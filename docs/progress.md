@@ -1,6 +1,6 @@
 # Implementation and verification ledger
 
-Updated: 2 October 2026. This ledger records the current repository, not just the planned architecture. The [specification](spec.md) defines acceptance; the [implementation plan](implementation-plan.md) defines remaining work.
+Updated: 3 October 2026. This ledger records the current repository, not just the planned architecture. The [specification](spec.md) defines acceptance; the [implementation plan](implementation-plan.md) defines remaining work.
 
 **Implemented** means code exists. **Verified** describes a specific executed check. **Partial** means some scope or acceptance evidence is missing. A bonus is not complete merely because its endpoint exists.
 
@@ -32,7 +32,7 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 | B09 | Smart caching | Implemented with scoped answer/query/embedding/parser reuse. Deterministic cache and retry checks pass. Measured live reuse report pending. |
 | B10 | Vector database | Implemented with pgvector plus lexical search/RRF. Exact retrieval; no HNSW performance claim. 10k-chunk benchmark pending. |
 | B11 | Streaming chat | Implemented. Live run produced 39 response text deltas, then canonical persisted completion. Browser stream/reconnect validation pending. |
-| B12 | Comprehensive testing | Partial: 47 backend tests passed previously; 17 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
+| B12 | Comprehensive testing | Partial: 47 backend tests passed previously; 25 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
 | B13 | Cost tracking/optimization | Partial. Durable actual provider usage/cost ledger, unknown-cost counts, caches and embedding microbatches exist. Versioned estimate rates and measured savings report pending. |
 | B14 | Rate limiting/quotas | Partial. Atomic Redis rate admission exists. Daily cost reservation/enforcement is not implemented; `DAILY_BUDGET_USD` currently has no enforcement. Budget/resource concurrency gates pending. |
 | B15 | Versions | Backend implemented; snapshots and retry scope verified. UI version details/upload exist. Explicit historical-version selection in the chat picker and full current-pointer stress gate pending. |
@@ -46,8 +46,8 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 |---|---|---|
 | Backend lint | `.venv/bin/ruff check src tests migrations` | Exit 0: `All checks passed!` |
 | Full backend tests | `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests -q` | Exit 0: **47 passed in 9.85s**; no skipped tests. Tests create isolated schemas; application data is preserved. PostgreSQL is real; providers and selected transport boundaries are deterministic fakes. |
-| Frontend transport/runtime tests | In `web/`: `bun test src/lib` | Exit 0: **17 passed, 0 failed, 36 assertions**. Covers split SSE frames, interrupted generation, actionable errors, complete pagination, persisted-status/provenance conversion, single composer dispatch, blocked sends retaining drafts, latest-turn retry routing, and backend-confirmed cancellation semantics using the published runtime and server-rendered primitives. These are not browser tests. |
-| Frontend typecheck/build | In `web/`: `bun run typecheck`; `bun run build` | Exit 0 after assistant-ui integration. Production bundle generated; lazy chat chunk 332.47 kB (98.42 kB gzip). This is a build-size observation, not a browser performance benchmark. |
+| Frontend transport/runtime tests | In `web/`: `bun test src/lib` | Exit 0: **25 passed, 0 failed, 53 assertions**. Covers split SSE frames, interrupted generation, actionable errors, complete pagination, persisted-status/provenance conversion, single composer dispatch, blocked sends retaining drafts, latest-turn retry routing, backend-confirmed cancellation semantics, and thinking-indicator visibility for waiting/streaming/terminal/optimistic messages using the published runtime and server-rendered primitives. These are not browser tests. |
+| Frontend typecheck/build | In `web/`: `bun run typecheck`; `bun run build` | Exit 0 after assistant-ui integration. Production bundle generated; lazy chat chunk 333.00 kB (98.69 kB gzip). This is a build-size observation, not a browser performance benchmark. |
 | 21st design review | `21st review web/src/App.tsx web/src/pages/chat.tsx web/src/index.css --json` | Local deterministic review executed; no errors. Composer uses a responsive maximum width, not a fixed minimum width. Dialog autofocus removed. Token-definition color suggestions are intentional. Final review: five files, zero errors/warnings; 12 informational color suggestions. |
 | Real PDF/OCR parser | Read back `/private/tmp/docvault-parser-verification.log` | Supplied assignment: 4 pages, 26 chunks with provenance. Image-only fixture: 1 page, 1 chunk, expected OCR text recovered. This does not verify the entire planned parser corpus or performance targets. |
 | Live upload/answer | `/private/tmp/docvault-api-smoke.py`; `/private/tmp/docvault-api-smoke-result.json` | Synthetic renewal policy ready; answer contains USD 1200 and 30 days; **39 deltas, 2 citations, 3 suggestions**; deltas match final content and persisted history matches. Smoke script was corrected to decode SSE event names separately from data. |
@@ -76,9 +76,16 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 - `bun install --frozen-lockfile` exit 0: 284 installs checked, no changes. Existing frontend page, transformed chat module, and API readiness each returned HTTP 200. Existing API/UI/worker/dispatcher PIDs checked alive; no new processes started.
 - Spec, plan, research, frontend README, design context, and AI assistance record updated together. Browser validation remains manual and pending; no automated browser was driven.
 
+## Thinking indicator: 3 October 2026
+
+- Read official [ThinkingIndicator docs](https://www.assistant-ui.com/elements/thinking-indicator), Context7, and upstream source. Confirmed installed React runtime **0.15.23**. Registry retrieval failed (HTTP 403); retrieved the source directly from assistant-ui's official GitHub repository instead. Retained the MIT license and only required ShimmerLabel/mono helpers. No dependency, backend API, or provider change.
+- Replaced custom chat spinners and three-dot placeholder with the local registry-style ThinkingIndicator, bound to the runtime. Waiting includes empty/whitespace text parts and optimistic placeholders before admission; visible answer text and terminal states hide it. Includes elapsed client waiting time, neutral shimmer/pulse, a status live region, and reduced-motion fallback. Initial sends render the runtime placeholder while awaiting server admission. Timer cleanup is implemented for inactivity/unmount.
+- Baseline `bun run typecheck` exit 0; **17 tests / 36 assertions** passed. Final `bun test src/lib`: exit 0, **25 passed / 53 assertions**. Published-runtime/server-rendered checks cover pending, streaming-empty, whitespace, streaming-text, complete, failed, cancelled, and one optimistic indicator. `bun run typecheck` and `bun run build` exit 0. `21st review` exit 0, zero errors/warnings and one existing shadow-color informational suggestion.
+- Existing frontend page, transformed thinking-component module, and API readiness returned HTTP 200. Browser rendering, shimmer appearance, reduced-motion behavior, live timer increments/cleanup, and send/stop/retry transitions remain unverified in the browser; the user chose manual validation. No browser or new development process was started. Spec, plan, ledger, frontend/design docs, and AI assistance record updated together.
+
 ## Next work, in order
 
-1. User's manual UI review: New Run, select files, send, Past Runs, rename/delete, stop/regenerate, citations, mobile drawer, and Files/Usage.
+1. User's manual UI review: New Run, select files, send, thinking indicator/timer/reduced motion, Past Runs, rename/delete, stop/regenerate, citations, mobile drawer, and Files/Usage.
 2. Implement optional cost reservations and versioned price estimates; test concurrent budget admission and unknown provider outcomes. Review resource quotas without restoring removed token/source-count caps.
 3. Complete historical source selection, persistent realtime revisions/recovery, and batch/version audit gaps.
 4. Run the held-out RAG/grounding corpus, full recovery matrix, comparison/long-summary review and stated performance benchmarks.

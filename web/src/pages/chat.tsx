@@ -11,6 +11,7 @@ import {
   mergeVisibleMessage,
 } from "@/lib/assistant-runtime";
 import { Markdown } from "@/components/markdown";
+import { AssistantThinking } from "@/components/assistant-ui/elements/thinking-indicator";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -19,7 +20,6 @@ import {
   Copy,
   Plus,
   Sparkles,
-  LoaderCircle,
   RefreshCw,
   Square,
   FileStack,
@@ -256,7 +256,7 @@ export function ChatPage({
                 />
               ) : chatId && messages.isPending ? (
                 <LoadingRows />
-              ) : !items.length ? (
+              ) : !items.length && !streaming ? (
                 <div className="text-center">
                   <h1 className="flex items-center justify-center gap-3 text-[26px] font-semibold tracking-[-.8px] sm:text-[30px]">
                     <Sparkles
@@ -439,12 +439,8 @@ export function ChatPage({
 }
 function PendingMessage() {
   return (
-    <MessagePrimitive.Root
-      className="flex items-center gap-2 text-xs text-muted-foreground"
-      role="status"
-    >
-      <LoaderCircle className="size-3 animate-spin" />
-      Thinking with your documents
+    <MessagePrimitive.Root className="animate-enter">
+      <AssistantThinking className="text-xs" />
     </MessagePrimitive.Root>
   );
 }
@@ -480,25 +476,14 @@ function MessageView({
             <FileStack className="size-3.5" />
           </div>
           <span className="text-xs font-semibold">DocVault</span>
-          {activeStatus(message) && (
-            <span className="ml-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <LoaderCircle className="size-3 animate-spin" />
-              Thinking with your documents
-            </span>
-          )}
         </div>
         <div className="text-sm">
-          {message.content ? (
+          <AssistantThinking className="py-3 text-xs" />
+          {message.content && (
             <Markdown citations={message.citations} onCitation={onCitation}>
               {message.content}
             </Markdown>
-          ) : activeStatus(message) ? (
-            <div className="flex gap-1.5 py-3" aria-label="Generating response">
-              <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground/50" />
-              <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground/50 [animation-delay:150ms]" />
-              <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground/50 [animation-delay:300ms]" />
-            </div>
-          ) : null}
+          )}
         </div>
         {message.error && (
           <div className="mt-3">

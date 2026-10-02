@@ -90,6 +90,37 @@ button:disabled {
   line-height: 1.85;
   overflow-wrap: anywhere;
 }
+
+[data-slot="thinking-indicator"] .shimmer {
+  background: linear-gradient(
+    110deg,
+    var(--muted-foreground) 35%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 65%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation:
+    thinking-shimmer 2s linear infinite,
+    enter 0.22s ease-out both;
+}
+@keyframes thinking-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="thinking-indicator"] .shimmer {
+    background: none;
+    color: var(--muted-foreground);
+    animation: none;
+  }
+}
 .prose > * + * {
   margin-top: 1rem;
 }

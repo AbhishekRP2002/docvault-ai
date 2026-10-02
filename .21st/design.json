@@ -53,7 +53,8 @@
     "installed": [],
     "preferredPrimitives": [
       "existing shadcn/Radix button, dialog, input",
-      "assistant-ui Thread, Message, Composer, Suggestion, ActionBar.Reload"
+      "assistant-ui Thread, Message, Composer, Suggestion, ActionBar.Reload",
+      "assistant-ui ThinkingIndicator registry source"
     ],
     "patterns": [
       "single sidebar with nested Agent runs",
@@ -90,6 +91,10 @@
     {
       "date": "2026-10-02",
       "choice": "Use assistant-ui External Store Runtime for the chat with existing Python SSE and SQL history. Preserve neutral styling, citation drawer, + source picker, and sidebar-only run management."
+    },
+    {
+      "date": "2026-10-03",
+      "choice": "Use official ThinkingIndicator source bound to running/empty-text message state, with neutral shimmer and elapsed waiting time; retain MIT license, reuse existing CSS, and add no dependency."
     }
   ],
   "evidence": [

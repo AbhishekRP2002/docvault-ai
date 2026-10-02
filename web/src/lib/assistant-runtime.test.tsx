@@ -14,6 +14,7 @@ import {
   toAssistantMessage,
 } from "./assistant-runtime";
 import type { Message } from "./types";
+import { AssistantThinking } from "../components/assistant-ui/elements/thinking-indicator";
 
 function stored(id: string, changes: Partial<Message> = {}): Message {
   return {
@@ -83,6 +84,7 @@ function harness(
           <ThreadPrimitive.Messages>
             {({ message }) => (
               <MessagePrimitive.Root data-message={message.id}>
+                <AssistantThinking />
                 {message.content
                   .map((part) => (part.type === "text" ? part.text : ""))
                   .join("")}
@@ -155,6 +157,45 @@ describe("Python history to assistant-ui", () => {
         stored("user-2", { role: "user", parent_id: null }),
       ),
     ).toHaveLength(3);
+  });
+});
+
+describe("assistant-ui ThinkingIndicator", () => {
+  test.each([
+    { status: "pending", content: "", shown: true },
+    { status: "streaming", content: "", shown: true },
+    { status: "streaming", content: "  ", shown: true },
+    { status: "streaming", content: "Answer text", shown: false },
+    { status: "complete", content: "", shown: false },
+    { status: "failed", content: "", shown: false },
+    { status: "cancelled", content: "", shown: false },
+  ] as const)(
+    "$status with content '$content' shows indicator: $shown",
+    ({ status, content, shown }) => {
+      const { html } = harness({
+        messages: [stored("answer-1", { status, content })],
+        isRunning: status === "pending" || status === "streaming",
+      });
+      expect(html.includes('data-slot="thinking-indicator"')).toBe(shown);
+      if (shown) {
+        expect(html).toContain('role="status"');
+        expect(html).toContain("Thinking with your documents");
+        expect(html).toContain("0s");
+      }
+    },
+  );
+  test("renders one indicator for the optimistic assistant before server admission", () => {
+    const { html } = harness({
+      messages: [
+        stored("user-1", {
+          role: "user",
+          parent_id: null,
+          content: "Question",
+        }),
+      ],
+      isRunning: true,
+    });
+    expect(html.match(/data-slot="thinking-indicator"/g)).toHaveLength(1);
   });
 });
 

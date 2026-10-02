@@ -13,3 +13,5 @@ The source picker uses an accessible + icon with selected-file count. A small sp
 Rename and Delete live exclusively in the Past Runs menus. The main chat canvas has no duplicate session-management controls.
 
 Chat uses assistant-ui 0.15.23 with an External Store Runtime connected to Python history/SSE. Preserve the current spacing, neutral controls, source drawer, and citation rendering rather than importing a separate stock chat layout. The runtime owns presentation interactions; SQL owns persisted state.
+
+The waiting state uses assistant-ui's locally copied ThinkingIndicator, neutral dot/shimmer and an elapsed client waiting badge. Show it before answer text arrives and hide it once text streams or the attempt becomes terminal. Keep one status indicator per waiting message, reduced-motion fallback, and a polite live region.

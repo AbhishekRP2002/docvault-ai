@@ -1,6 +1,6 @@
 # AI assistance record
 
-Updated 2 October 2026. Codex assisted with the specification, implementation plan, research against official documentation, Python backend, LangGraph/provider integration, queue processing, React UI, tests, and documentation. The user supplied the assignment, provider preference/key locally, removed limits, deferred IAM, and corrected the initial UI direction.
+Updated 3 October 2026. Codex assisted with the specification, implementation plan, research against official documentation, Python backend, LangGraph/provider integration, queue processing, React UI, tests, and documentation. The user supplied the assignment, provider preference/key locally, removed limits, deferred IAM, and corrected the initial UI direction.
 
 Concrete corrections and checks:
 
@@ -10,6 +10,7 @@ Concrete corrections and checks:
 - Enforced one active generation per session while retaining cancellation and explicit latest-turn regeneration. Deterministic API tests exercise admission, source scope, idempotency, and cancellation races.
 - Replaced the initial three-column conversation layout after the user's review with a single sidebar, Agent/New Run/Past Runs, and a focused main canvas. Existing shadcn/Radix primitives were reused. 21st catalog retrieval returned HTTP 401; public sidebar guidance and local review were used instead.
 - Integrated assistant-ui 0.15.23 at the user's request after reading official components/runtime docs through the web and Context7 and checking installed source/types. External Store Runtime adapts Python history, SSE, cancellation and latest-turn regeneration. Added published-runtime tests without a browser or new test dependency; fixed the textarea focus indicator found by 21st review.
+- Added the official assistant-ui ThinkingIndicator on 3 October at the user's request. Registry access returned 403, so retrieved the source and MIT license from the official GitHub repository. Bound it to running/empty-text runtime state, adapted styling without dependencies, and added eight published-runtime/server-rendered visibility checks; browser animation/timer verification remains manual.
 - Corrected a verification script to decode SSE event names separately from payloads. The live synthetic policy answer produced 39 deltas, two citations and three suggestions; persisted history matched the final response.
 
 Executed checks and remaining gates are in [docs/progress.md](docs/progress.md). The full backend suite passed 47 tests with dedicated PostgreSQL integration enabled. Frontend transport tests, typecheck and production build passed. These checks do not establish held-out RAG quality or production readiness.
