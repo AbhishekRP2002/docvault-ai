@@ -22,6 +22,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { PastRunRow } from "@/components/past-run-row";
 import { ErrorState, LoadingRows } from "@/components/common";
 const Library = lazy(() =>
   import("@/pages/library").then((m) => ({ default: m.Library })),
@@ -243,24 +244,17 @@ export default function App() {
                 c.title.toLowerCase().includes(runSearch.toLowerCase()),
               )
               .map((chat) => (
-                <Button
+                <PastRunRow
                   key={chat.id}
-                  variant="ghost"
-                  onClick={() => selectRun(chat.id)}
-                  aria-current={
-                    location.page === "chat" && location.chat === chat.id
-                      ? "page"
-                      : undefined
-                  }
-                  className={cn(
-                    "mb-0.5 h-8 w-full justify-start pl-8 pr-2 text-[12px] font-normal",
-                    location.page === "chat" && location.chat === chat.id
-                      ? "bg-secondary font-medium"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  <span className="truncate">{chat.title}</span>
-                </Button>
+                  chat={chat}
+                  active={location.page === "chat" && location.chat === chat.id}
+                  onSelect={() => selectRun(chat.id)}
+                  onDeleted={(id) => {
+                    if (location.page === "chat" && location.chat === id)
+                      selectRun(null);
+                    document.getElementById("main-content")?.focus();
+                  }}
+                />
               ))
           )}
           {!!runSearch &&

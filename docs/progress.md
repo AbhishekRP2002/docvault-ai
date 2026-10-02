@@ -27,7 +27,7 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 | B04 | Categorization and tags | Implemented. Live synthetic policy has persisted category/tags. Manual filter validation pending. |
 | B05 | Key insights | Implemented with evidence IDs. Live policy insights returned HTTP 200. Human claim-support and late-document tests pending. |
 | B06 | Comparison | Implemented with per-cell source IDs and missing-information states. Full live comparison quality gate pending. |
-| B07 | Frontend/dashboard | Implemented; redesigned to one sidebar plus main workspace. Agent contains New Run and Past Runs. Build/typecheck pass; user chose manual browser validation. |
+| B07 | Frontend/dashboard | Implemented; redesigned to one sidebar plus main workspace. Agent contains New Run and Past Runs with hover/focus/touch menus for rename and confirmed deletion. Composer uses + for source selection and a small heading sparkle. Build/typecheck pass; user chose manual browser validation. |
 | B08 | Realtime updates | Partial. WebSocket invalidations, polling/reconciliation and SSE exist; persistent database revisions and full reconnect/lifecycle matrix pending. |
 | B09 | Smart caching | Implemented with scoped answer/query/embedding/parser reuse. Deterministic cache and retry checks pass. Measured live reuse report pending. |
 | B10 | Vector database | Implemented with pgvector plus lexical search/RRF. Exact retrieval; no HNSW performance claim. 10k-chunk benchmark pending. |
@@ -56,6 +56,15 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 
 21st catalog search returned HTTP 401. Public [sidebar guidance](https://docs.21st.dev/blog/react-sidebar-component-examples) informed nested navigation; project shadcn/Radix primitives were reused. No catalog component is claimed installed. Durable design choices live in [`.21st/design.json`](../.21st/design.json).
 
+## Latest UI refinement: 2 October 2026
+
+- Replaced the Select files label with an accessible + control; selected-file count remains visible.
+- Added a small sparkle beside the new-run heading.
+- Added each past run's three-dot menu using the existing Radix package (no dependency added), with Rename and Delete. Touch devices show the trigger without requiring hover; keyboard focus also reveals it. Rename/delete have pending/error states, and deletion requires confirmation. Deleting the selected run returns to New Run.
+- Baseline and final TypeScript checks passed; production build passed; six existing transport tests passed. `21st review` of the four changed components returned zero errors/warnings and one informational existing shadow-color suggestion.
+- Live API verification, using a newly created temporary session only: create **201**, rename **200**, persisted title matches, delete **204**, persisted session absent. No browser was driven and no model call was needed. Manual UI/menu/focus validation is pending.
+- Previous development API/UI/worker/dispatcher processes were no longer running. PostgreSQL/Redis were healthy. Replacement processes are listed below.
+
 ## Next work, in order
 
 1. User's manual UI review: New Run, select files, send, Past Runs, rename/delete, stop/regenerate, citations, mobile drawer, and Files/Usage.
@@ -73,4 +82,4 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 
 ## Local processes retained for manual review
 
-Frontend: http://127.0.0.1:5173/#agent, PID **47231**. API: http://127.0.0.1:8000/docs, PID **47097**. These are the existing development processes, retained for the user's review. Stop only these owned processes with `kill 47231` or `kill 47097` when finished. Worker PID **47157** and dispatcher PID **47739** remain available; stop with `kill 47157` and `kill 47739` when finished. PostgreSQL/Redis are the `docvault-ai` Compose services; stop just these with `docker compose stop postgres redis` when no processing is running. No unrelated containers were stopped.
+Frontend: http://127.0.0.1:5173/#agent, PID **43101**. API: http://127.0.0.1:8000/docs, PID **43059**. These are the replacement development processes, retained for the user's review. Stop only these owned processes with `kill 43101` or `kill 43059` when finished. Worker PID **43352** and dispatcher PID **43325** remain available; stop with `kill 43352` and `kill 43325` when finished. PostgreSQL/Redis are the `docvault-ai` Compose services; stop just these with `docker compose stop postgres redis` when no processing is running. No unrelated containers were stopped.

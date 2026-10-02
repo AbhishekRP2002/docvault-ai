@@ -4,9 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   Check,
-  ChevronDown,
   Copy,
-  FileText,
+  Plus,
+  Sparkles,
   LoaderCircle,
   Pencil,
   RefreshCw,
@@ -298,8 +298,12 @@ export function ChatPage({
               <LoadingRows />
             ) : !items.length ? (
               <div className="text-center">
-                <h1 className="text-[26px] font-semibold tracking-[-.8px] sm:text-[30px]">
-                  What are we working on?
+                <h1 className="flex items-center justify-center gap-3 text-[26px] font-semibold tracking-[-.8px] sm:text-[30px]">
+                  <Sparkles
+                    className="size-6 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <span>What are we working on?</span>
                 </h1>
                 <p className="mt-3 text-[13px] text-muted-foreground">
                   Ask a question. Get answers from your files.
@@ -391,20 +395,25 @@ export function ChatPage({
                 }}
               />
               <div className="flex items-center justify-between">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-8 gap-1.5 px-2 text-[12px] text-muted-foreground"
-                  disabled={busy}
-                  onClick={() => setPicker(true)}
-                >
-                  <FileText className="size-3.5" />
-                  {sources.length
-                    ? `${sources.length} ${sources.length === 1 ? "file" : "files"}`
-                    : "Select files"}
-                  <ChevronDown className="size-3" />
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-8 text-muted-foreground"
+                    disabled={busy}
+                    onClick={() => setPicker(true)}
+                    aria-label="Select files"
+                    title="Select files"
+                  >
+                    <Plus className="size-4" />
+                  </Button>
+                  {sources.length > 0 && (
+                    <span className="text-[12px] text-muted-foreground">
+                      {sources.length} {sources.length === 1 ? "file" : "files"}
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-3">
                   {modelLabel && (
                     <span className="hidden text-[11px] text-muted-foreground sm:inline">
