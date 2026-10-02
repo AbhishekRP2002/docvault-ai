@@ -11,7 +11,12 @@ from docvault.errors import AppError
 from docvault.models import Chunk
 
 
-def fuse_ranks(rankings: list[list[str]], constant: int = 60) -> list[str]:
+def calculate_rrf(rankings: list[list[str]], constant: int = 60) -> list[str]:
+    """Return IDs ordered by reciprocal rank fusion, with deterministic ties.
+
+    pgvector-python provides an RRF SQL example, not an importable helper:
+    https://github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py
+    """
     scores = defaultdict(float)
     for ranking in rankings:
         for rank, identifier in enumerate(ranking, 1):
@@ -68,7 +73,7 @@ async def retrieve(query: str, version_ids: list[str], ai) -> list[Evidence]:
             )
             for chunk in dense + lexical:
                 evidence[chunk.id] = chunk_evidence(chunk, version)
-            ranked = fuse_ranks([[c.id for c in dense], [c.id for c in lexical]])
+            ranked = calculate_rrf([[c.id for c in dense], [c.id for c in lexical]])
             chosen.extend(ranked[:2])
             remaining.extend(ranked[2:])
         # Ensure selected sources are represented; no selected-document or evidence-token cap.

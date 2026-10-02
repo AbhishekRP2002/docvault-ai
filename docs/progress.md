@@ -30,7 +30,7 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 | B07 | Frontend/dashboard | Implemented; redesigned to one sidebar plus main workspace. Agent contains New Run and Past Runs with hover/focus/touch menus for rename and confirmed deletion. Composer uses + for source selection and a small heading sparkle. assistant-ui 0.15.23 powers the chat thread/composer via External Store Runtime, with scroll-to-bottom, accessible icon tooltips and streaming MarkdownText. Build/typecheck and 32 frontend tests pass; user chose manual browser validation. |
 | B08 | Realtime updates | Partial. WebSocket invalidations, polling/reconciliation and SSE exist; persistent database revisions and full reconnect/lifecycle matrix pending. |
 | B09 | Smart caching | Implemented with scoped answer/query/embedding/parser reuse. Deterministic cache and retry checks pass. Measured live reuse report pending. |
-| B10 | Vector database | Implemented with pgvector plus lexical search/RRF. Exact retrieval; no HNSW performance claim. 10k-chunk benchmark pending. |
+| B10 | Vector database | Implemented with pgvector `cosine_distance`, PostgreSQL full-text search and application `calculate_rrf` fusion. Exact retrieval; native HNSW/IVFFlat indexing is benchmark-gated. Four fusion unit cases and cited-chat/retry API checks pass. 10k-chunk benchmark pending. |
 | B11 | Streaming chat | Implemented. Live run produced 39 response text deltas, then canonical persisted completion. Browser stream/reconnect validation pending. |
 | B12 | Comprehensive testing | Partial: 47 backend tests passed previously; 32 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
 | B13 | Cost tracking/optimization | Partial. Durable actual provider usage/cost ledger, unknown-cost counts, caches and embedding microbatches exist. Versioned estimate rates and measured savings report pending. |
@@ -55,6 +55,12 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 | Browser validation | User response on 2 October 2026 | **Manual validation selected. Agent did not drive the browser.** Desktop/mobile appearance and interactive flow remain unverified. |
 
 21st catalog search returned HTTP 401. Public [sidebar guidance](https://docs.21st.dev/blog/react-sidebar-component-examples) informed nested navigation; project shadcn/Radix primitives were reused. No catalog component is claimed installed. Durable design choices live in [`.21st/design.json`](../.21st/design.json).
+
+## Retrieval review: 3 October 2026
+
+- Renamed `fuse_ranks` to `calculate_rrf` and updated its retrieval call without changing fusion behavior. Checked installed pgvector-python **0.5.0** and official docs/example: no importable RRF helper exists; the project's search already uses library/database operators. HNSW/IVFFlat are database ANN indexes, not hybrid-fusion replacements, and remain deferred to measured filtered recall/latency.
+- Baseline unit tests: **19 passed**. After adding four fusion cases for cross-list consensus, empty keyword results, deterministic ties and empty input, `.venv/bin/python -m pytest tests/unit -q` passed **23 tests**. `.venv/bin/ruff check src/docvault/retrieval.py tests/unit/test_retrieval.py` exited 0, `All checks passed!`.
+- `TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests/integration/test_api.py -q -k 'cited_chat or retry_keeps_original' --tb=short` exited 0: **2 passed, 17 deselected**. Isolated database schemas and fake provider; no new live provider/performance claim.
 
 ## Chat polish: 3 October 2026
 
