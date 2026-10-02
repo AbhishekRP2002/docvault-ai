@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "project": {
+    "name": "docvault-ai",
+    "productType": "document SaaS workspace",
+    "stack": [
+      "React",
+      "Vite",
+      "TypeScript",
+      "Tailwind v4",
+      "shadcn/Radix"
+    ]
+  },
+  "sources": {
+    "tokens": [
+      "web/src/index.css"
+    ],
+    "components": [
+      "web/src/components/ui"
+    ],
+    "assets": [],
+    "instructions": [
+      "AGENTS.md"
+    ]
+  },
+  "design": {
+    "colorMode": "light",
+    "colors": {
+      "primary": "#242832",
+      "background": "#f7f8fa",
+      "card": "#ffffff",
+      "foreground": "#181b22"
+    },
+    "typography": {
+      "family": "Geist Variable",
+      "navigation": "12-13px",
+      "body": "14px"
+    },
+    "spacing": {},
+    "radius": {
+      "controls": "6px",
+      "composer": "12px"
+    },
+    "shadows": {},
+    "motion": {
+      "duration": "150-220ms",
+      "reducedMotion": true
+    },
+    "density": "compact navigation, focused canvas"
+  },
+  "components": {
+    "installed": [],
+    "preferredPrimitives": [
+      "existing shadcn/Radix button, dialog, input"
+    ],
+    "patterns": [
+      "single sidebar with nested Agent runs",
+      "breadcrumb header",
+      "centered new-run composer",
+      "bottom composer during an existing run"
+    ]
+  },
+  "constraints": {
+    "must": [
+      "Two columns on desktop: sidebar and workspace",
+      "Agent contains New Run and Past Runs",
+      "Keyboard-accessible nested history",
+      "User performs browser validation"
+    ],
+    "avoid": [
+      "separate conversation rail",
+      "promotional sidebar cards",
+      "sparkle hero",
+      "decorative gradient borders",
+      "large rounded navigation tiles"
+    ]
+  },
+  "decisions": [
+    {
+      "date": "2026-10-02",
+      "choice": "Neutral document SaaS shell inspired by the user supplied fileAI reference. Preserve existing primitives and backend contracts."
+    }
+  ],
+  "evidence": [
+    {
+      "fact": "project.instructions",
+      "source": "AGENTS.md"
+    },
+    {
+      "fact": "user-selected-reference",
+      "source": "second screenshot in 2026-10-02 conversation"
+    },
+    {
+      "fact": "21st-sidebar-guidance",
+      "source": "https://docs.21st.dev/blog/react-sidebar-component-examples"
+    },
+    {
+      "fact": "catalog-search-unavailable",
+      "source": "21st search --context auto returned HTTP 401; no catalog component installed"
+    }
+  ],
+  "generatedAt": "2026-10-02T12:38:25.069Z"
+}

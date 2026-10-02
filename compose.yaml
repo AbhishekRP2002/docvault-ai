@@ -1,0 +1,74 @@
+name: docvault-ai
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: docvault
+      POSTGRES_PASSWORD: docvault
+      POSTGRES_DB: docvault
+    ports: ["127.0.0.1:15432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docvault -d docvault"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:16379:6379"]
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: .
+    env_file: .env
+    environment: &app_env
+      DATABASE_URL: postgresql+psycopg://docvault:docvault@postgres:5432/docvault
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /app/data
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    build: .
+    env_file: .env
+    environment: *app_env
+    command: ["uv", "run", "--no-sync", "uvicorn", "docvault.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["files:/app/data"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  worker:
+    build: .
+    env_file: .env
+    environment: *app_env
+    command: ["uv", "run", "--no-sync", "python", "-m", "docvault.worker"]
+    volumes: ["files:/app/data", "models:/root/.cache"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  dispatcher:
+    build: .
+    env_file: .env
+    environment: *app_env
+    command: ["uv", "run", "--no-sync", "python", "-m", "docvault.dispatcher"]
+    volumes: ["files:/app/data"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  web:
+    build:
+      context: ./web
+    ports: ["127.0.0.1:5173:80"]
+    depends_on:
+      api: {condition: service_started}
+volumes:
+  postgres_data:
+  redis_data:
+  files:
+  models:
