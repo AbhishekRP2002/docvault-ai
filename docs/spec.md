@@ -1,0 +1,355 @@
+# DocVault AI specification
+
+Status: approved direction; implementation in progress. Updated: 2 October 2026. Verification status is tracked in [implementation-plan.md](implementation-plan.md).
+
+Source: the four-page supplied assignment, `ai powered document vault system.pdf`, followed by the user's design decisions in this conversation. This document defines the target contract; a feature is not verified merely because it appears here. Backend and frontend work are underway, with live integration and acceptance evidence recorded separately.
+
+## 1. Outcome and scope
+
+A user uploads documents, sees processing progress, reads useful AI insights, and asks follow-up questions with citations that open the exact supporting source. They can compare documents or versions and inspect processing reliability and AI usage.
+
+The submission must include a working **Python backend**, PostgreSQL, a real task queue, document parsing, a supported hosted model/embedding integration, storage, API documentation, an `AI_USAGE.md`, and a required document-chat demo. The assignment gives approximately equal weight to AI-first development, product thinking, and technical implementation. A UI is optional in the assignment and included here to cover its bonus.
+
+Delivery is staged, but the target includes every bonus item in section 13. The first complete slice is upload -> asynchronous processing -> one cited answer -> persisted history -> metrics. All-bonus completion is a later release gate, not a claim about that first slice.
+
+### Current decisions
+
+| Topic | Initial decision |
+|---|---|
+| Deadline | Awaiting user input; milestones are ordered without assuming a submission date. |
+| Providers | OpenRouter for generation and embeddings through the OpenAI Python SDK, with `base_url=https://openrouter.ai/api/v1`. Initial models: `openai/gpt-4.1-mini` and `openai/text-embedding-3-small`, subject to live account/model checks. The user reports the provider key is configured in local `.env`; keep it server-side. |
+| Deployment | Reproducible localhost Docker Compose demo. Bind published service ports to loopback. Public deployment is outside the current scope. |
+| Formats | PDF, DOCX, UTF-8 TXT; digital and scanned PDFs. English is the first tested language. Other languages are best effort and clearly labeled. |
+| Limits | Configurable upload safeguards: 25 MiB/file, 100 PDF pages, 10 files/batch, 100 MiB total/batch. No extracted-token cap per file and no fixed maximum selected versions for chat/comparison. Evidence-token tuning is deferred; provider context/input limits still apply explicitly. |
+| Demo quotas | One shared local workspace: configurable 100 logical documents, 1 GiB source storage, 20 uploads/hour, 20 chat requests/minute, and a provisional USD 5 daily AI budget. These are resource controls, not identity boundaries. |
+| Identity | IAM is entirely deferred. No application authentication, API-key layer, user accounts, tenant isolation, or multi-tenant tests in this phase. All local clients share the same documents and chats. |
+| Frontend | React + TypeScript + Vite with shadcn/ui components and direct Python SSE integration. One compact sidebar and one main workspace. Files holds the library; Agent contains New Run and nested Past Runs. Usage exposes operational metrics. Versions, insights, and comparison remain integrated with files and runs. |
+| Orchestration | Compiled LangGraph workflows coordinate ordinary Python functions. PostgreSQL owns durable jobs, messages, and stage checkpoints; RQ transports jobs. A LangGraph checkpointer is initially deferred. |
+| Ambiguous bonus | Choose **key insight extraction**, which satisfies the assignment's “sentiment analysis or key insight extraction” alternative. Generic sentiment is not useful for every document. |
+
+Arbitrary remote-URL ingestion, archives, handwriting guarantees, chart understanding, collaborative sharing, and IAM are outside this phase. Unsupported content must be visible to the user. A document can be text-searchable without the system understanding its charts.
+
+## 2. Main user journeys
+
+1. **Upload and understand:** submit one or several files; receive durable IDs and status links; see processing stages; read summary, categories, tags, key facts, and suggested questions. A failed file has a useful error and retry action.
+2. **Ask and verify:** choose ready documents; ask a question; receive streamed provisional text followed by a persisted, validated answer with citations. Clicking a citation shows the version, PDF page or DOCX/TXT location, and supporting quote.
+3. **Continue:** ask “How does that affect the renewal date?”; history resolves the reference, but fresh document retrieval supplies factual evidence.
+4. **Compare:** choose at least two documents or specific historical versions and dimensions such as price, termination, and renewal; receive a structured comparison with evidence for each populated cell and explicit missing information. There is no fixed selection-count ceiling.
+5. **Revise:** upload a new immutable snapshot under an existing logical document. Earlier answers retain their exact source versions. A document selection can be updated to a newer ready version for subsequent turns.
+6. **Inspect:** view document counts, processing failures/latencies, queue age, token usage, estimated cost, and cache behavior for the current workspace.
+7. **Manage conversations:** create and reopen multiple chat sessions, rename them, and change selected documents between turns. Cancel an active answer or explicitly regenerate/retry the latest user turn once its prior attempt is terminal. Normal history shows the newest assistant attempt for each user turn; earlier attempts remain stored and individually retrievable. No branch-selection UI is required.
+
+The desktop shell follows the user-provided fileAI reference: a breadcrumb header, neutral compact navigation, and a centered composer for a new run. Past runs live under Agent in the same sidebar; there is no additional conversation column or promotional sidebar card. A run maps to the existing chat session API. Existing transcripts retain a bottom composer, sources, citations, suggestions, rename/delete, cancel, and regeneration. Mobile uses a navigation drawer. The user selected manual browser validation on 2 October 2026.
+
+Current implementation and verification status are recorded in [progress.md](progress.md); this specification states the intended acceptance contract.
+
+UI states include empty library, upload progress, queued/processing, ready, failed, missing evidence, budget exhausted, stream interruption, and retry. Upload acceptance, processing readiness, and completed generation are separate successes.
+
+## 3. Architecture and dependencies
+
+Use a modular monolith with separate API, worker, and small dispatcher processes from one Python package. LangGraph expresses workflow stages and conditional paths; business behavior remains in small functions with explicit inputs. Introduce interfaces only at the storage, model, queue, and persistence boundaries.
+
+```mermaid
+flowchart LR
+    U[React UI / API client] --> A[FastAPI]
+    A --> P[(PostgreSQL + pgvector)]
+    A --> F[(Private file storage)]
+    A --> G[Compiled LangGraph workflows]
+    G --> O[OpenRouter via OpenAI SDK]
+    P --> D[Job dispatcher / recovery]
+    D --> R[(Redis / RQ)]
+    R --> W[Python workers]
+    W --> F
+    W --> L[Docling + OCR]
+    W --> G
+    W --> P
+    A --> R
+```
+
+| Component | Selection and reason |
+|---|---|
+| API | FastAPI + Pydantic: validation and generated OpenAPI. |
+| Persistence | PostgreSQL + pgvector, SQLAlchemy 2 + Alembic: metadata, history, vectors, lexical search, and durable jobs in one database. Use explicit SQL for retrieval. |
+| Jobs | RQ + Redis: ordinary Python task functions and bounded retry behavior. A small dispatcher recovers committed work not yet enqueued. |
+| Workflows | LangGraph `StateGraph` compiled once and invoked with request/job state. Ingestion: parse -> chunk -> embed -> activate. Chat: load context -> rewrite if needed -> retrieve -> generate -> validate -> persist. Insights/comparison reuse the same functions and artifact/job contracts. |
+| Parsing | Docling standard pipeline, explicit OCR engine configuration, local cached model assets. Validate CPU/RAM needs in milestone 0. |
+| AI | OpenAI Python SDK pointed at OpenRouter. Configurable `openai/gpt-4.1-mini` generation and `openai/text-embedding-3-small` embeddings, initially 1,536 dimensions after verification. |
+| Storage | Private local volume shared by API/worker on the single demo host; a small storage interface permits S3 later. Local storage is sufficient for the assignment. |
+| Cache | Redis TTL keys for embedding inputs and exact response reuse; PostgreSQL remains authoritative. |
+| UI | React + TypeScript + Vite + shadcn/ui. Fetch JSON/SSE directly from FastAPI; use shared or generated API types where practical. |
+| Checks | pytest, HTTPX, Ruff; real PostgreSQL/Redis integration checks; focused Playwright UI flows. |
+
+LangGraph is workflow orchestration, RQ is job transport, and PostgreSQL is the durable authority. Compile graphs without a checkpointer initially: invocation state is transient, SQL history is loaded explicitly, and application stage checkpoints decide which ingestion work to reuse after a retry. This does not provide automatic LangGraph checkpoint resume, token replay, or exactly-once model calls. Avoid graph-level retries that multiply the database-owned retry policy. [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
+
+RQ is selected for the Python workload and ordinary function-based jobs. BullMQ also has Python bindings; the choice is not based on a claim that BullMQ requires Node.js. The evidence and alternatives are in [research.md](research.md).
+
+### Trusted boundaries
+
+- The current service is a shared localhost application. No IAM enforcement is claimed. Bind exposed ports to loopback and allow only the configured local frontend origin for browser requests and WebSockets.
+- Apply selected-version and active-index predicates inside retrieval and citation queries. Recheck source existence/deletion before serving cached results and committing answers; selection is a relevance boundary, not an authorization boundary.
+- Validate filename, magic bytes/container structure, extension, byte/page limits, DOCX expanded-size limits, and supported encoding. Reject encrypted PDFs with an actionable message. Count extracted tokens for chunking/usage without rejecting a file solely for its extracted-token count.
+- Stream uploads to temporary files, compute SHA-256, store under server-generated paths, and never use a supplied filename as a path. Do not fetch external DOCX relationships or execute embedded content.
+- Parse in worker processes with time/memory limits. Treat partial parsing or missing pages as an explicit failure/warning; do not silently mark an incompletely indexed document ready.
+- Document text and chat history are untrusted content. Generation has no tools or external URL fetch capability. Sanitize rendered Markdown and disable raw HTML.
+- Keep provider keys, full document bodies, prompts, and sensitive file URLs out of logs. The OpenRouter key remains on the Python server and is never sent to the browser. IAM and a public-hosting security design require a later scope decision.
+
+## 4. Document lifecycle and reliable jobs
+
+### Upload contract
+
+`POST /v1/documents` accepts multipart content and an `Idempotency-Key`. It returns `202` only after bytes are durably stored and the version plus job intent are committed. The response contains `document_id`, `version_id`, `job_id`, `status`, and status URLs. An identical request/key returns the original resource; the same key with different content/options returns `409`.
+
+Within the shared local workspace, duplicate bytes can reuse parser/embedding artifacts with an identical pipeline fingerprint. An exact repeat of the current version under the same logical document returns that version instead of creating another. Explicitly reverting to older content creates a new version while safely reusing matching artifacts.
+
+Reuse computed values, not deletion ownership: each version owns its source storage key, canonical artifact, and chunk records. Copy matching parsed output/vector values into those owned records. This uses some additional storage but avoids shared-blob reference counting in the first implementation. Evicting a cache entry or deleting one version must not remove another live version's content.
+
+File storage and PostgreSQL do not share a transaction. Store the blob first, commit its reference second, and remove unreferenced temporary/orphan files after a grace period. A database failure must not produce a success response. Storage keys must not expose hashes publicly.
+
+### States
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> parsing
+    parsing --> chunking
+    chunking --> embedding
+    embedding --> ready
+    parsing --> failed
+    chunking --> failed
+    embedding --> failed
+    failed --> queued: explicit retry / transient retry policy
+    queued --> deleted
+    parsing --> deleted
+    chunking --> deleted
+    embedding --> deleted
+    ready --> deleted
+    failed --> deleted
+```
+
+`ready` means the full supported content and its searchable index generation are committed. AI insight generation has a separate `pending/running/ready/failed` status; its failure must not disable otherwise valid chat. Insight jobs start after the index becomes ready. Expose stage, attempt, completed units, total units when known, timestamps, and structured errors; do not invent percentage progress.
+
+### Execution contract
+
+- A PostgreSQL `jobs` row is both the durable work request and recovery record. The dispatcher selects eligible rows using short leases, publishes their IDs to RQ, and records publication. A crash between enqueue and acknowledgement can duplicate delivery.
+- Workers claim execution through a database compare-and-set lease and increment a fencing token. Every stage checkpoint and final state change checks that token. Stale workers cannot publish results after recovery or deletion.
+- Use deterministic artifact signatures: source hash + parser/OCR version/options; then chunker/tokenizer version/options; then embedding model/dimensions and exact contextualized input hash. Persist successful stage outputs and embed only missing inputs.
+- Write chunks under an index-generation ID. Activate the complete generation in one transaction; retrieval cannot see a half-built index. Do not mix incompatible embedding models/dimensions.
+- Treat delivery as **at least once**. Unique constraints, compare-and-set transitions, and upserts make database effects idempotent. A provider call that succeeded before a crash may be billed again on retry; do not promise exactly-once external calls.
+- Retry transient network, `429`, and provider `5xx` failures up to three total attempts with backoff and jitter. Honor provider retry hints. Validation, unsupported files, and deterministic parse errors are terminal. Coordinate SDK and job retries so they do not multiply unexpectedly.
+- The dispatcher re-enqueues abandoned work after expired leases, reconciles unpublished jobs, and expires abandoned chat runs. Persist next-attempt times and enforce one retry owner. RQ is the execution transport; PostgreSQL owns recovery decisions.
+- Deleting a document immediately hides it from all read/retrieval paths, fences active jobs, and schedules deletion of blobs/artifacts/chunks/caches. Historical chat text remains in its workspace, but its source links become unavailable; disclose this retention policy. Cleanup retries are idempotent and reported.
+
+## 5. Parsing, chunking, and insights
+
+**Conversion:** preserve native text where reliable and apply OCR to relevant image regions. Keep headings, reading order, paragraphs, lists, tables, page locations, and available bounding boxes in a canonical artifact. TXT receives line/character locations; DOCX uses heading/paragraph/table locations because it has no stable intrinsic page numbering. English OCR is configured explicitly. Chart/diagram interpretation is not implied by OCR.
+
+**Chunking:** start with structure-aware chunks of approximately 600 tokens, counting heading context within the budget. Keep tables intact when possible; otherwise split by rows with repeated headers. Use small overlap only for oversized prose splits, not universally. Each chunk retains its original text, contextualized embedding text, source item IDs, exact spans, heading path, page locations, and checksum. Preserve a mapping from normalized text to source spans so citations do not rely on reconstructed offsets.
+
+**Embedding:** call OpenRouter's embeddings endpoint through the OpenAI SDK. Send arrays of missing inputs, batching by the configured model/provider's verified per-input and per-request limits. Split oversized inputs without losing source coverage; never depend on a provider silently truncating text. Persist each completed batch. Cache exact input/model/dimension signatures in the local workspace. Batch size and concurrency are independent controls.
+
+**Insights:** a schema-validated result contains a brief summary, category, up to eight tags, key insights with evidence IDs, and up to three suggested questions. Use a combined call for a short document. For long documents, extract source-linked section facts in model-safe groups and reduce them into a document summary; preserve original source references and report any incomplete coverage. Summarization must cover the document, not just the first retrieved chunks.
+
+**Customization:** accept `length = short|medium|long`, up to five `focus_areas`, and `tone = neutral|executive|plain_language`. Suggested approximate lengths are 100/250/500 words; treat these as output targets, not guarantees. Full-document summaries use section coverage; focused summaries disclose their focus. Cache by version, options, source/index fingerprint, prompt, and model. Unknown facts stay unknown; formatting options must not change facts.
+
+## 6. Retrieval and conversation behavior
+
+### Documents, versions, and sessions
+
+A **document** is the logical item displayed in the library. A **version** is an immutable snapshot of its uploaded bytes, extracted content, index, and provenance. The UI lets users select logical documents and resolves each to its current ready version; historical versions can be chosen explicitly. A pending/failed new version does not hide the previous ready one.
+
+Each chat session has a title and a mutable default selection of version IDs. `PATCH /v1/chats/{id}` with `{title?, version_ids?}` changes the title or the selection used by subsequent turns. The UI shows the resolved version beside a selected document and offers its newer ready version when available; it does not silently retarget a selection. There is no maximum selected-version count. Creating an empty session is allowed, but asking a document question requires at least one ready selected version.
+
+At message admission, copy the session's selected version IDs and active index fingerprints onto the turn. Historical messages keep this snapshot when the selection changes or new versions arrive. A selection change during generation applies to the next turn; it cannot change the active turn. Multiple sessions maintain independent histories and selections. Earlier assistant text cannot establish facts about newly selected sources.
+
+### Answer workflow
+
+1. Validate the session and snapshot its ready selected versions; cap question input at 4,000 characters. Limit one active generation per chat using a database constraint/claim. A concurrent generation returns `409` with the active assistant message ID. This guard prevents a race; it does not prohibit retry or regeneration after an earlier attempt is terminal.
+2. Load bounded recent turns. For follow-ups, use a small structured rewrite step to produce a standalone retrieval question without adding facts. If the reference remains ambiguous, ask for clarification. Prior assistant text is conversational context, never evidence.
+3. Embed the query once. Retrieve relevant dense and lexical candidates within the message's version/index snapshot. Use PostgreSQL full-text ranking and RRF with an initial constant of 60. Candidate counts are tuning settings, not selected-document limits. Retain exact identifiers in lexical input.
+4. Deduplicate and assemble relevant evidence, expanding adjacent source spans when useful. There is no fixed application evidence-token ceiling in this phase. Calculate room from the configured provider context window after instructions, schema, question, history, and reserved output tokens. Keep every embedding/generation request model-safe. For a request whose necessary evidence cannot fit, split the work with source-preserving intermediate results or fail with error code `context_limit_exceeded` and a narrowing suggestion. Do not silently truncate evidence or drop a selected source needed by the question.
+5. Optional reranking is an evaluation-gated improvement. Calibrate evidence-sufficiency handling against unanswerable cases; similarity scores are not probabilities and no universal similarity cutoff establishes truth.
+6. Generate only from supplied evidence. Support `answered`, `insufficient_evidence`, and `clarification_needed` outcomes. Cite material factual claims and preserve contradictions with both sources. A question requiring unsupported chart interpretation gets an explicit limitation.
+7. Validate result shape, source evidence IDs, and quoted spans before completion. A valid citation ID proves reference integrity, not semantic support; measure claim support separately in the evaluation corpus. Allow one bounded repair for invalid structure/citations, otherwise fail visibly.
+8. Recheck source deletion state and the active generation claim, then persist the answer, resolved citations, retrieved evidence IDs, message version snapshot, pipeline/model versions, usage, and status atomically before emitting completion. If a source was deleted or the run cancelled during generation, reject the late result. Cache only successfully validated completed results.
+
+Keep full history in PostgreSQL and select recent context within the actual model window. If older context is excluded, expose that fact rather than silently treating an unresolved reference as understood. A later measured tuning pass may introduce evidence/history budgets; the removed arbitrary caps are not restored as hidden constants.
+
+### Structured answer and retries
+
+The model result is a Pydantic `Answer` with `response: str`, `suggestions: list[str]` of at most three items, `citation_ids: list[str]`, and `outcome: answered|insufficient_evidence|clarification_needed`. The response uses server-issued citation markers for factual claims. The frontend receives a `Message` with `content` mapped from `Answer.response`, plus `suggestions`, resolved `citations`, and `outcome`; the server also records its message ID, turn version snapshot, status, and usage. `citation_ids` remain part of the internal structured AI result rather than replacing resolved source objects in the UI. Suggestions come from the same structured generation, and may be empty when no useful follow-up exists.
+
+`POST /v1/chats/{id}/messages/{assistant_id}/retry` creates a new assistant attempt for the latest user turn only, linked to that user message and original version snapshot after its most recent assistant attempt is completed, failed, interrupted, or cancelled. Retrying an older turn returns `409`; this phase does not introduce conversation branches. Retrying a completed answer is regeneration. It requires a new idempotency key and bypasses exact answer reuse so it can produce a new answer. Earlier attempts are retained and available by message ID; normal chat history returns the newest assistant attempt per user turn. A changed document selection applies to a new user turn rather than silently changing what an old retry means.
+
+`POST /v1/chats/{id}/messages/{assistant_id}/cancel` records cancellation and fences finalization; stop the provider stream where possible. Only a terminal or fenced prior attempt releases the active-generation claim. Cancellation cannot promise that the provider billed no further work. Replaying a retry key returns the same attempt rather than starting another paid call.
+
+### Citation representation
+
+```json
+{
+  "citation_id": "c1",
+  "document_id": "uuid",
+  "version_id": "uuid",
+  "chunk_id": "uuid",
+  "filename": "supplier-contract.pdf",
+  "location": {"page": 3, "section": "Termination"},
+  "quote": "Either party may terminate on 30 days written notice."
+}
+```
+
+The model selects only server-issued evidence IDs. The server resolves titles, version numbers, locations, and quotes from stored spans. PDF pages are one-based physical pages; printed page labels are optional extra metadata. Multi-page chunks carry multiple spans, and citations identify the span actually supporting the claim. Source APIs recheck document existence/deletion and citation-to-version relationships.
+
+### Comparison
+
+Reuse retrieval per selected document and requested dimension so a larger document does not crowd out the others. Generate rows with a cell per document, citations per factual cell, and `not_found` when evidence is absent. Cite both sides of differences. At least two versions are required, with no fixed upper selection limit. Split processing or paginate a comparison that cannot fit one model request; disclose coverage and never silently drop a selected document. Comparison jobs use the same artifact/job machinery as customized summaries.
+
+## 7. Streaming and realtime behavior
+
+- `POST .../messages` supports JSON and `Accept: text/event-stream`. Validate and reserve the message before starting the stream; use the same service for both modes.
+- SSE events: `message.started`, `answer.delta`, `answer.completed`, `message.failed`. A cancellation uses `message.failed` with the canonical message status `cancelled`. Deltas are explicitly provisional. `answer.completed` returns the persisted frontend `Message` with canonical `content`, `suggestions`, resolved `citations`, and `outcome` after database commit. Its internal `Answer` has already been validated.
+- Stream actual OpenRouter generation through the OpenAI SDK. Extract incremental `response` text from the structured payload, then validate the complete `Answer`; do not show raw partial JSON or simulate streaming by replaying a completed answer. Verify structured output plus streaming on the actual model/provider route. LangGraph custom stream events can carry SDK deltas without relying on an automatic LangChain model-token hook.
+- Client disconnect cancels the active generation where possible; save a terminal cancellation/interruption state if completion has not committed. Completed output remains recoverable through history. Retry requires an explicit new retry key, not an automatic second paid generation. Preserve the user message and link retries to it.
+- Chat token-delta replay is outside v1. On reconnect, fetch persisted status/history. Do not advertise resumable SSE tokens without a durable event log.
+- Processing progress and persisted chat lifecycle/completion notifications use the local workspace WebSocket plus status endpoint fallbacks. SSE carries the active chat's token deltas; WebSocket events identify changed message IDs/revisions so clients can fetch canonical chat state. Check configured local origins; there is no authentication frame or application key in this phase.
+- Persist progress with a monotonic revision in PostgreSQL; Redis notifications wake subscribers. On connect/reconnect send a database snapshot, discard stale revisions, and periodically reconcile while connected so a lost notification cannot freeze the UI.
+
+## 8. Data model and invariants
+
+| Table / entity | Important fields and constraints |
+|---|---|
+| `workspace_settings` | One local singleton with quotas and reserved/committed document/storage counters. No account, principal, API-key, or tenant models in this phase. |
+| `document_batches`, `batch_items` | Request signature, stable input ordinal, accepted version/job or rejection, aggregate status. Unique batch/ordinal. |
+| `documents` | Title, current ready version, deletion timestamp. |
+| `document_versions` | Document, version number, hash, storage key, MIME, bytes/pages/tokens, parse/index fingerprints, active index generation, processing and insight statuses. Unique document/version number. |
+| `chunks` | Version, generation, ordinal, original/contextualized text, provenance JSON, input hash, embedding `vector(1536)`, `tsvector`. Unique generation/ordinal. |
+| `artifacts` | Version or compared-version set, type, options hash, payload/storage key, source/model/prompt fingerprint, status. Includes canonical parse and structured insights. |
+| `jobs`, `job_attempts` | Kind, resource, payload signature, state, stage, revision, attempts, lease/fencing token, next retry, start/end, error code, timing. Unique active work signature. |
+| `chats`, `chat_documents` | Session title and mutable default selected version IDs, timestamps, revision. Multiple independent sessions. Selection edits do not rewrite message snapshots. |
+| `messages` | Chat, sequence, role, user-message/retry-parent, client idempotency key, state/revision, immutable version/index snapshot, content/Answer, citations/evidence IDs, generation claim, usage references, timestamps. At most one active assistant generation/chat; terminal attempts can be retried. |
+| `ai_calls` | Job/message/stage, OpenRouter generation/request ID, routed provider when known, model, attempt, token usage, cached tokens, latency, outcome, cost estimate, price-table version, unknown-usage flag. |
+| `usage_budgets` | Local workspace/date, reserved and settled cost; transactional reservations prevent concurrent overspend against the configured estimate. |
+| `idempotency_records` | Method/route + key, request fingerprint, resource/result, expiration within the shared local workspace. Concurrent claims are unique. |
+| `metric_buckets` | Time bucket, operation, counts, duration histogram, safe aggregate labels. Persisted API performance history without request bodies. |
+
+Use timezone-aware UTC timestamps and UUID identifiers. Add document/version/message foreign keys and constraints to prevent invalid source associations. Version numbers and current-version promotion require row locking: concurrent uploads must not duplicate numbers or let an older completed job replace a newer ready version. A failed new version leaves the previous ready version current.
+
+Create B-tree scope indexes and a GIN lexical index. Begin with exact vector search; add HNSW with measured filtered recall only when corpus size warrants it. Retain immutable versions referenced by historical messages; whole-document deletion applies the retention policy above.
+
+## 9. API surface
+
+All `/v1` endpoints serve the same unauthenticated local workspace. Collections use cursor pagination. Errors use `{error: {code, message, retryable, details}, request_id}`. Use `400/422` for invalid inputs, `404` for missing/deleted resources, `409` for state/idempotency conflicts, `413` for limits, `415` for unsupported formats, `429` for rate/quota exhaustion, and `503` for unavailable required services.
+
+| Method and path | Contract |
+|---|---|
+| `POST /v1/documents` | Single upload, durable `202`; duplicate/idempotency result identifies the existing resource. |
+| `POST /v1/document-batches` | Multiple files; independent per-file accepted/rejected results and batch ID. No all-or-nothing processing promise. |
+| `GET /v1/document-batches/{id}` | Per-file progress and aggregate counts. |
+| `GET /v1/documents` | Paginated list; filters for status/category/tag. |
+| `GET /v1/documents/{id}` | Logical document, current version, processing/insight status. |
+| `DELETE /v1/documents/{id}` | Hide immediately, queue cleanup, return `202` with cleanup job. |
+| `POST /v1/documents/{id}/versions` | Explicit new version upload. |
+| `GET /v1/documents/{id}/versions` | Version history and status. |
+| `GET /v1/versions/{id}` | Version metadata and exact processing status. |
+| `GET /v1/versions/{id}/content` | Original download or extracted content, selected by an explicit representation parameter; deleted sources are unavailable. |
+| `GET /v1/versions/{id}/insights` | Current summary, tags, evidence-backed insights, suggestions, or pending/failed state. |
+| `POST /v1/versions/{id}/summaries` | Validated customization; return existing ready artifact or `202` job. |
+| `POST /v1/versions/{id}/retry` | Retry a failed eligible stage; never restart successful stages unnecessarily. |
+| `GET /v1/jobs/{id}` | Stage, attempts, safe error, revision, and timings. |
+| `POST /v1/chats` | Create a session with title and selected ready `version_ids`; an empty initial selection is allowed. No fixed maximum selection count. |
+| `PATCH /v1/chats/{id}` | `{title?, version_ids?}` updates the session title/default selection for subsequent turns. Existing messages and any active turn keep their captured versions. |
+| `GET /v1/chats`, `GET /v1/chats/{id}/messages` | Chat listing and ordered, paginated history; show the newest assistant attempt per user turn. Earlier attempts remain accessible by message ID. |
+| `POST /v1/chats/{id}/messages` | Question + idempotency key; snapshot the current nonempty ready selection; JSON or SSE. |
+| `POST /v1/chats/{id}/messages/{assistant_id}/retry` | New idempotency key retries/regenerates the latest user turn after its most recent attempt is terminal, preserving its original input/version snapshot; supports JSON/SSE. An older turn returns `409`. |
+| `POST /v1/chats/{id}/messages/{assistant_id}/cancel` | Fence an active attempt and request upstream cancellation; repeated calls return the canonical terminal state. |
+| `GET /v1/chats/{id}/messages/{message_id}` | Recover canonical message/status after disconnection. |
+| `GET /v1/versions/{id}/chunks/{chunk_id}` | Cited excerpt and provenance; validate the chunk belongs to the requested live version. |
+| `POST /v1/comparisons` | At least two versions and requested dimensions; no maximum selected-version count. Existing artifact or `202` job, with model-safe split processing when necessary. |
+| `GET /v1/artifacts/{id}` | Summary/comparison result and status; recheck referenced-source deletion. |
+| `GET /v1/metrics/documents` | Logical document/version counts, status counts, formats, bytes, categories. |
+| `GET /v1/metrics/processing` | Attempt/document outcomes, stage duration percentiles, queue age, retry counts, throughput over explicit time window. |
+| `GET /v1/metrics/usage` | Actual token usage where known, estimated cost, reservations, budget, cache hits. |
+| `WS /v1/events` | Local processing/insight/comparison and chat lifecycle updates; origin checks and snapshot reconciliation. |
+| `GET /health/live`, `GET /health/ready` | Liveness; bounded DB/Redis/storage checks plus recent worker heartbeat for readiness. |
+| `GET /metrics` | Local operational metrics export; avoid document/chat IDs as metric labels. |
+
+Batch transport failures before acceptance fail the request. Once a batch is accepted, each file has its own resource or rejection record; retrying the batch idempotency key returns the same membership without duplicating jobs.
+
+## 10. Caching, quotas, and cost
+
+- **Parse cache:** local namespace + content hash + parser/OCR options and versions. Store durably beside canonical artifacts.
+- **Embedding cache:** local namespace + hash of exact embedding text + model + dimensions + preprocessing version. Redis accelerates lookup; existing committed chunk vectors provide durable reuse where inputs match.
+- **Answer cache:** local namespace + message version/index fingerprints + question + bounded history hash + retrieval settings + prompt/model/schema versions. Cache exact requests for 15 minutes initially. Exclude failures, incomplete streams, and ambiguous outcomes. Do not use a question-only key or semantic answer cache.
+- **Insight cache:** artifact signatures include customization and source versions. New versions naturally get new keys; deletion prevents reuse immediately even before eviction finishes.
+- **Rate limits:** atomic Redis counters by local workspace and operation, with `Retry-After`; separate upload and chat limits. Fail new paid work closed if quota enforcement is unavailable, while allowing safe status/history reads where possible.
+- **Budget:** reserve a conservative maximum before each billable call; settle from returned usage using a versioned price configuration. Reconcile reservations after crashes. Unknown provider usage remains conservatively reserved/reported until reconciled; it is not counted as zero. Include failed/retried calls where usage is known.
+- **Resource quotas:** reserve document slots and declared storage bytes transactionally before accepting a file; enforce the actual streamed byte limit and settle the reservation after persistence. Release failed/abandoned reservations through recovery. Count a new version against storage, not an additional logical-document slot.
+- **Optimization:** reuse unchanged input embeddings between versions, combine short-document analysis outputs, avoid unneeded query rewriting, batch embedding inputs, and bound context/output/concurrency. Two ingestion workers and four concurrent provider calls are initial settings to tune.
+
+Cost figures are estimates from measured usage and configured rates, not invoices. Track embedding input tokens, generation input/output tokens, cached input tokens, requests, cache hits, retries, and uncertain charges separately. A provider Batch integration is optional future optimization; ordinary embedding batching satisfies the proposed batch-optimization bonus.
+
+## 11. Observability and operational behavior
+
+Structured logs carry request/job/chat/message IDs, stage, attempt, durations, status, error code, model, usage, and pipeline fingerprint. Do not log document content by default. Persist processing attempt history and AI calls so metrics survive restarts. Emit request latency/error counts, worker heartbeat, oldest queued-job age, parse/embedding/generation timings, cache hits, token/cost totals, and active reservations.
+
+Document counts distinguish logical documents, versions, and deleted records. Processing metrics distinguish final document failures from failed attempts. Report sample count with p50/p95 and use `null` when no data exists; avoid misleading percentiles on tiny samples. API percentiles need timestamped observations or histogram storage; process-local counters alone do not satisfy persisted performance history.
+
+Readiness does not make paid model calls. Expose configured-provider status separately from live provider reachability. A Redis outage may delay newly accepted durable ingestion jobs; the status must say queued/delayed rather than imply active processing. Recovery redispatches committed work.
+
+## 12. Verification and acceptance gates
+
+These are proposed targets, not measured results. Keep a tuning corpus separate from a frozen acceptance set. Include synthetic, redistributable documents with exact facts and evidence locations; use no confidential source material.
+
+| Area | Release criterion |
+|---|---|
+| Core flow | Upload returns durable IDs; a worker completes parsing/indexing; a cited answer and follow-up survive API/worker restart; metrics reflect the run. |
+| Parsing | Fixtures cover clean/two-column/table/scanned/mixed PDFs, DOCX, TXT, duplicate, encrypted, corrupt, oversized, empty, and instruction-bearing files. Validate known facts and source locations, including OCR text that could be skipped during chunking. |
+| Retrieval | On at least 30 held-out answerable questions, evidence hit rate@8 >=90%. Report multi-document evidence coverage separately; at least 80% of multi-source cases retrieve every required source. |
+| Grounding | >=95% of reviewed material factual claims are supported by their cited spans; 100% of citation IDs resolve to the turn's captured source version at answer time. Human-reviewed rubric is the gate; an LLM judge is supplementary. |
+| Abstention | At least 10 genuinely unanswerable/ambiguous cases; >=90% correctly abstain or request clarification. Include absent facts and unsupported chart questions. Separately label answerable conflicting-evidence cases (cite both sides) and answerable injection-bearing cases (ignore instructions, answer the legitimate question). Each fixture declares its expected outcome. Report counts, not just percentages. |
+| Insights/comparison | Summary claims retain evidence; long-document fixtures include important facts near the end; comparison cites each nonempty cell and marks missing information explicitly. |
+| Source scope | Retrieval, cache reuse, and citations respect each turn's captured version/index set; stale/deleted sources fail visibly. No IAM or tenant-isolation acceptance claim in this phase. |
+| Recovery | Kill worker mid-stage, lose Redis after DB commit, duplicate delivery, retry after provider timeout, and delete during ingestion; no duplicate active artifacts or half-visible indexes, and no permanently stranded accepted work. |
+| Versioning | Concurrent version uploads allocate unique numbers; an older job cannot replace a newer current version; historical message citations remain pinned; deleting a document cannot damage another document/version that reused its computed values. |
+| Limits | Concurrent requests cannot bypass configured budget/storage/document quotas; exhausted limits create clear errors without starting extra provider calls. |
+| Streaming/retry | Real deltas arrive before generation completes; final completion follows DB commit; disconnect/reconnect exposes correct persisted status; no duplicate paid run on idempotent replay. Explicit regeneration of the latest user turn works after completion; older-turn retry returns `409`; cancel fences late results, and a second simultaneous generation returns `409`. |
+| Sessions/selection | Multiple sessions preserve independent histories; selection edits affect future turns only. More than ten selected chat versions and more than four comparison versions are not rejected by a count cap. Provider overflow is explicit; no whole-document token cap or silent truncation. |
+| Performance | On a declared 4-vCPU/8-GiB reference environment with warm parser assets: target p95 metadata API <300 ms, upload acceptance after final byte <1 s, retrieval <500 ms at 10k chunks, first chat delta <5 s at 5 concurrent chats, and a 10-page digital PDF ready <60 s. Record OCR separately. Adjust only with measured explanation. |
+| Reproducibility | Fresh clone + documented environment + Compose + migrations + asset setup reproduces tests and demo. Real-provider smoke is separate from deterministic CI; no fake result is presented as a live answer. |
+
+Evaluate retrieval hit rate independently of answer correctness: each question has an acceptable evidence set, and multi-source questions require coverage of the relevant sets. Report claim-support numerator/denominator and document type breakdown. Benchmark latency across at least 30 repetitions where practical; report first-run cost, warm-run cost, hardware, model, and concurrency.
+
+## 13. Assignment traceability
+
+Milestones refer to [implementation-plan.md](implementation-plan.md). Every bonus is part of the target; research experiments beyond these features are optional.
+
+| Requirement | Scope and evidence | Milestone |
+|---|---|---|
+| Intelligent upload, analysis, async processing | Validation/deduplication; durable jobs; structured insights; failure/retry demo | M1-M4 |
+| Document retrieval and insights APIs | List/detail/content/status/insights OpenAPI examples | M2-M4 |
+| Start chat, ask, history, multi-turn | Multiple sessions; editable selections; per-turn source snapshots; retry/cancel; persisted cited turns | M3 |
+| Document statistics and processing metrics | DB-backed counts, timings, retries, errors | M2, M6 |
+| Required stack | Python/FastAPI, PostgreSQL, Redis/RQ, LangGraph workflows, parser, OpenRouter AI, private storage | M1-M3 |
+| Repository, README, AI usage, chat demo | Reproducible setup, prompt rationale, actual AI-assistance record, demo script/recording | M1, M7 |
+| B01 Multi-document chat | Select 2+ documents/versions; answer using evidence from multiple documents | M3, M5 |
+| B02 Follow-up suggestions | Up to three grounded suggestions in insights/completed answers | M3-M5 |
+| B03 Customized summaries | Length/focus/tone with visible coverage and cache identity | M4 |
+| B04 Categorization and tags | Structured persisted category/tags; filtering | M4 |
+| B05 Sentiment OR key insights | Evidence-backed key insights, including important later sections | M4 |
+| B06 Comparative analysis | Evidence per cell, explicit missing information and contradictions | M5 |
+| B07 Simple frontend/dashboard | Refined library/chat screens with integrated versions, insights, comparison, and metrics | M6 |
+| B08 Realtime updates | WebSocket processing and chat lifecycle updates with reconnect recovery | M6 |
+| B09 Smart caching | Embedding reuse and exact, scoped response caching with invalidation tests | M5 |
+| B10 Vector database integration | PostgreSQL pgvector retrieval and recorded index configuration | M3 |
+| B11 Streaming chat | Real SSE deltas and persisted canonical completion | M3 |
+| B12 Comprehensive testing | Unit/integration/E2E/failure and retrieval/grounding evaluation evidence | M1-M7 |
+| B13 Cost tracking/optimization | AI call ledger, versioned rate estimates, reuse and batch metrics | M3, M5 |
+| B14 Rate limiting/quotas | Concurrency-safe admission and budget reservation tests | M5 |
+| B15 Document versions | Immutable versions and pinned historical citations | M2, M5 |
+| B16 Batch optimization | Per-file batch jobs, embedding microbatches, bounded concurrency, unchanged-input reuse | M2, M5 |
+| B17 Detailed observability | Correlated structured logs, persistent history, operational metrics | M2, M6 |
+| B18 Health/monitoring | Live/ready, worker heartbeat, document/processing/usage metrics | M1, M6 |
+
+## 14. Remaining validation and deferred decisions
+
+Implementation proceeds with the approved OpenRouter, LangGraph, RQ, and React/Vite/shadcn direction. The provider key is reported configured; live model access, embedding dimensions, parser resource consumption, and streaming/schema compatibility still require recorded checks. No reference images were attached, so the interface uses an original, coherent library/chat design rather than a claimed visual match.
+
+Submission timing remains to be confirmed. IAM, public hosting, LangGraph checkpointer persistence, and measured evidence-token tuning are deferred. All 18 bonus features remain in the target. The living implementation plan distinguishes work in progress from verified behavior.

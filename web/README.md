@@ -15,11 +15,11 @@ bun test src/lib
 bun run build
 ```
 
-Library: batch upload with transfer progress, processing status, search, list/grid view, document insights with citations, versions, customized summaries, and multi-document comparisons. Select ready documents to create a scoped conversation.
+Files: batch upload with transfer progress, processing status, search, list/grid view, document insights with citations, versions, customized summaries, and multi-document comparisons. Select ready documents to create a scoped conversation.
 
-Conversations: persisted sessions, searchable source selection, streaming responses, up to three suggestions, citations, stop, and regeneration of the latest answer. A stopped or disconnected browser does not imply that server processing stopped; Stop calls the cancellation endpoint explicitly.
+Agent: New Run and collapsible, searchable Past Runs in the main sidebar. One main canvas holds persisted sessions, searchable source selection, streaming responses, up to three suggestions, citations, stop, and regeneration of the latest answer. A stopped or disconnected browser does not imply that server processing stopped; Stop calls the cancellation endpoint explicitly.
 
-Analytics: persisted document, processing, token, and cost metrics. Missing provider cost is shown explicitly.
+Usage: persisted document, processing, token, and cost metrics. Missing provider cost is shown explicitly.
 
 The source selector loads every page of the document library; it has no hidden document-count cap.
 
@@ -29,4 +29,4 @@ The application polls during processing and reconnects the update WebSocket afte
 
 The shadcn primitives follow [the official Vite installation](https://ui.shadcn.com/docs/installation/vite), [Radix sheet implementation](https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/new-york-v4/ui/sheet.tsx), and [Radix AlertDialog](https://ui.shadcn.com/docs/components/alert-dialog). Keeping the primitives local avoids introducing a second chat runtime alongside the Python streaming API.
 
-Browser interaction and visual validation require explicit permission under this repository's AGENTS.md. Build and transport tests do not establish that those checks were performed.
+The user selected manual browser validation on 2 October 2026. Build and transport tests passed; desktop/mobile appearance and interactive browser flows remain unverified. See [the progress ledger](../docs/progress.md) for actual evidence and outstanding gates.
