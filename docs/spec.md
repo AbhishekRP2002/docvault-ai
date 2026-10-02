@@ -1,6 +1,6 @@
 # DocVault AI specification
 
-Status: approved direction; implementation in progress. Updated: 2 October 2026. Verification status is tracked in [implementation-plan.md](implementation-plan.md).
+Status: approved direction; implementation in progress. Updated: 3 October 2026. Verification status is tracked in [implementation-plan.md](implementation-plan.md).
 
 Source: the four-page supplied assignment, `ai powered document vault system.pdf`, followed by the user's design decisions in this conversation. This document defines the target contract; a feature is not verified merely because it appears here. Backend and frontend work are underway, with live integration and acceptance evidence recorded separately.
 
@@ -28,6 +28,8 @@ Delivery is staged, but the target includes every bonus item in section 13. The 
 | Ambiguous bonus | Choose **key insight extraction**, which satisfies the assignment's “sentiment analysis or key insight extraction” alternative. Generic sentiment is not useful for every document. |
 
 The chat uses `@assistant-ui/react` 0.15.23 with [External Store Runtime](https://www.assistant-ui.com/docs/runtimes/custom/external-store). The locally copied, MIT-licensed [ThinkingIndicator](https://www.assistant-ui.com/elements/thinking-indicator) reads assistant-ui message state, appears while awaiting answer text (including empty text parts and optimistic placeholders), and hides on visible answer text or terminal status. Its elapsed badge measures the current client-side waiting interval; styling uses existing neutral tokens and honors reduced motion. React Query supplies canonical Python history and SSE updates; the runtime controls thread rendering, scrolling, composer input/send/cancel, suggestion triggers, and latest-answer reload. Source selection, citation rendering, explicit clipboard errors, and sidebar run management remain project components. SQL owns persisted sessions and attempts. No Assistant Cloud, Node AI proxy, edit/branch UI, or client-side provider call is introduced.
+
+Chat polish uses the runtime's [scroll-to-bottom control](https://www.assistant-ui.com/elements/scroll-anchor): readers can inspect older messages without being pulled to the latest response, and explicitly return to the bottom with a button that hides when already there. [TooltipIconButton](https://www.assistant-ui.com/elements/tooltip-icon-button) provides consistent hover/focus descriptions and accessible names for icon-only chat controls, using the existing Radix primitives. Assistant answers use [MarkdownText](https://www.assistant-ui.com/elements/markdown-text) through `MessagePrimitive.Parts` and `@assistant-ui/react-markdown`, with streaming-aware formatting, GFM tables, and fenced-code copy controls. Preserve inline source links to the existing citation drawer, safe external links, disabled raw HTML, and explicit clipboard failures. Non-chat Markdown retains its existing renderer. Message editing was considered and explicitly skipped by the user on 3 October 2026; it is deferred with branching.
 
 Arbitrary remote-URL ingestion, archives, handwriting guarantees, chart understanding, collaborative sharing, and IAM are outside this phase. Unsupported content must be visible to the user. A document can be text-searchable without the system understanding its charts.
 
