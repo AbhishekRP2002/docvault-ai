@@ -8,25 +8,16 @@ import {
   Plus,
   Sparkles,
   LoaderCircle,
-  Pencil,
   RefreshCw,
   Square,
   FileStack,
-  Trash2,
   X,
 } from "lucide-react";
 import { api, generate } from "@/lib/api";
 import type { Chat, Citation, Message, VaultDocument } from "@/lib/types";
 import { cn, errorMessage } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Input, Textarea } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { ConfirmDialog } from "@/components/ui/alert-dialog";
+import { Textarea } from "@/components/ui/input";
 import { ErrorState, LoadingRows } from "@/components/common";
 import { DocumentPicker } from "@/components/document-picker";
 import { CitationDrawer, citationLocation } from "@/components/citation-drawer";
@@ -50,9 +41,6 @@ export function ChatPage({
   const client = useQueryClient();
   const [draftSources, setDraftSources] = useState(initialVersions);
   const [picker, setPicker] = useState(false);
-  const [rename, setRename] = useState(false);
-  const [name, setName] = useState("");
-  const [deleteChat, setDeleteChat] = useState<Chat | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -95,7 +83,7 @@ export function ChatPage({
   }, [items]);
   useEffect(() => () => stream.current?.abort(), []);
   const edit = useMutation({
-    mutationFn: (data: { title?: string; version_ids?: string[] }) =>
+    mutationFn: (data: { version_ids: string[] }) =>
       api<Chat>(`/v1/chats/${chatId}`, {
         method: "PATCH",
         body: JSON.stringify(data),
@@ -103,15 +91,6 @@ export function ChatPage({
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["chats"] });
       setPicker(false);
-      setRename(false);
-    },
-  });
-  const remove = useMutation({
-    mutationFn: (id: string) => api(`/v1/chats/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      if (chatId === deleteChat?.id) onSelectChat(null);
-      setDeleteChat(null);
-      void client.invalidateQueries({ queryKey: ["chats"] });
     },
   });
   function mergeMessage(id: string, incoming: Message) {
@@ -240,36 +219,6 @@ export function ChatPage({
   return (
     <div className="flex h-full min-h-0">
       <section className="flex min-w-0 flex-1 flex-col bg-card">
-        {selectedChat && (
-          <header className="flex h-12 shrink-0 items-center justify-end gap-1 px-5 sm:px-8">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground"
-              onClick={() => {
-                setName(selectedChat.title);
-                edit.reset();
-                setRename(true);
-              }}
-            >
-              <Pencil className="size-3.5" />
-              Rename
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 text-muted-foreground"
-              aria-label="Delete run"
-              disabled={busy}
-              onClick={() => {
-                remove.reset();
-                setDeleteChat(selectedChat);
-              }}
-            >
-              <Trash2 className="size-3.5" />
-            </Button>
-          </header>
-        )}
         <div
           ref={scroll}
           onScroll={() => {
@@ -467,47 +416,6 @@ export function ChatPage({
         }}
       />
       <CitationDrawer citation={citation} onClose={() => setCitation(null)} />
-      <Dialog open={rename} onOpenChange={setRename}>
-        <DialogContent>
-          <DialogTitle>Rename run</DialogTitle>
-          <DialogDescription>
-            Give this run a name that is easy to find.
-          </DialogDescription>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              edit.mutate({ title: name.trim() });
-            }}
-          >
-            <Input
-              aria-label="Run name"
-              className="my-5"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              maxLength={200}
-            />
-            {edit.error && <ErrorState error={edit.error} />}
-            <div className="flex justify-end">
-              <Button disabled={edit.isPending || !name.trim()}>
-                {edit.isPending ? "Saving…" : "Save name"}
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <ConfirmDialog
-        open={!!deleteChat}
-        onOpenChange={(open) => !open && setDeleteChat(null)}
-        title="Delete this run?"
-        description="The run and its message history will be permanently removed. Your documents will stay in the library."
-        pending={remove.isPending}
-        onConfirm={() => deleteChat && remove.mutate(deleteChat.id)}
-      />
-      {remove.error && (
-        <div className="fixed bottom-5 right-5 z-[60] max-w-sm">
-          <ErrorState error={remove.error} />
-        </div>
-      )}
       {readyDocuments.length === 0 && !documents.length && (
         <span className="sr-only">
           Upload a document in the library before chatting.

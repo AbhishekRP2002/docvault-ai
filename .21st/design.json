@@ -65,7 +65,8 @@
       "Two columns on desktop: sidebar and workspace",
       "Agent contains New Run and Past Runs",
       "Keyboard-accessible nested history",
-      "User performs browser validation"
+      "User performs browser validation",
+      "Rename and Delete appear exclusively in Past Runs menus, not in the main chat canvas"
     ],
     "avoid": [
       "separate conversation rail",

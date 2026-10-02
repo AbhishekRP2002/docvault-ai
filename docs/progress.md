@@ -60,6 +60,7 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 
 - Replaced the Select files label with an accessible + control; selected-file count remains visible.
 - Added a small sparkle beside the new-run heading.
+- Removed duplicate rename/delete controls and their unused dialog/state handlers from the main chat window; session management stays exclusively in the Past Runs menu. TypeScript and build checks passed; manual browser validation remains pending.
 - Added each past run's three-dot menu using the existing Radix package (no dependency added), with Rename and Delete. Touch devices show the trigger without requiring hover; keyboard focus also reveals it. Rename/delete have pending/error states, and deletion requires confirmation. Deleting the selected run returns to New Run.
 - Baseline and final TypeScript checks passed; production build passed; six existing transport tests passed. `21st review` of the four changed components returned zero errors/warnings and one informational existing shadow-color suggestion.
 - Live API verification, using a newly created temporary session only: create **201**, rename **200**, persisted title matches, delete **204**, persisted session absent. No browser was driven and no model call was needed. Manual UI/menu/focus validation is pending.
@@ -82,4 +83,4 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 
 ## Local processes retained for manual review
 
-Frontend: http://127.0.0.1:5173/#agent, PID **43101**. API: http://127.0.0.1:8000/docs, PID **43059**. These are the replacement development processes, retained for the user's review. Stop only these owned processes with `kill 43101` or `kill 43059` when finished. Worker PID **43352** and dispatcher PID **43325** remain available; stop with `kill 43352` and `kill 43325` when finished. PostgreSQL/Redis are the `docvault-ai` Compose services; stop just these with `docker compose stop postgres redis` when no processing is running. No unrelated containers were stopped.
+Frontend: http://127.0.0.1:5173/#agent, PID **47368**. API: http://127.0.0.1:8000/docs, PID **47180**. These are detached replacement development processes, last checked reachable (API readiness and frontend HTTP both 200), retained for the user's review. Stop only these owned processes with `kill 47368` or `kill 47180` when finished. Worker PID **47366** and dispatcher PID **47367** remain available; stop with `kill 47366` and `kill 47367` when finished. PostgreSQL/Redis are the `docvault-ai` Compose services; stop just these with `docker compose stop postgres redis` when no processing is running. No unrelated containers were stopped.
