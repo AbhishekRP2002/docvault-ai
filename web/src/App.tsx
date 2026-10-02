@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity,
+  ChartColumn,
   FileStack,
   FolderOpen,
   Menu,
@@ -119,7 +119,7 @@ export default function App() {
   }
   const nav = [
     { id: "library" as const, label: "Files", icon: FolderOpen },
-    { id: "analytics" as const, label: "Usage", icon: Activity },
+    { id: "analytics" as const, label: "Usage", icon: ChartColumn },
   ];
   const sidebar = (
     <>

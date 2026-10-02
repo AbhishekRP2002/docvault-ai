@@ -83,6 +83,11 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 - Baseline `bun run typecheck` exit 0; **17 tests / 36 assertions** passed. Final `bun test src/lib`: exit 0, **25 passed / 53 assertions**. Published-runtime/server-rendered checks cover pending, streaming-empty, whitespace, streaming-text, complete, failed, cancelled, and one optimistic indicator. `bun run typecheck` and `bun run build` exit 0. `21st review` exit 0, zero errors/warnings and one existing shadow-color informational suggestion.
 - Existing frontend page, transformed thinking-component module, and API readiness returned HTTP 200. Browser rendering, shimmer appearance, reduced-motion behavior, live timer increments/cleanup, and send/stop/retry transitions remain unverified in the browser; the user chose manual validation. No browser or new development process was started. Spec, plan, ledger, frontend/design docs, and AI assistance record updated together.
 
+## Usage icon: 3 October 2026
+
+- Replaced the sidebar Usage pulse/Activity icon with Lucide `ChartColumn`, using the existing package and the same compact sizing. The shared sidebar covers desktop and mobile navigation.
+- Baseline and final `bun run typecheck`: exit 0. No new tests, dependency, server, or browser session needed for this icon change; visual validation remains manual. Spec and implementation plan synchronized.
+
 ## Next work, in order
 
 1. User's manual UI review: New Run, select files, send, thinking indicator/timer/reduced motion, Past Runs, rename/delete, stop/regenerate, citations, mobile drawer, and Files/Usage.
