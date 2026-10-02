@@ -1,6 +1,6 @@
 # DocVault AI
 
-A local document workspace with asynchronous PDF/DOCX/TXT ingestion, source-aware insights, cited chat sessions, comparisons, versions, streaming, and operational metrics. Python/FastAPI, PostgreSQL/pgvector, RQ/Redis, LangGraph and OpenRouter power the backend; React/Vite/shadcn power the frontend.
+A local document workspace with asynchronous PDF/DOCX/TXT ingestion, source-aware insights, cited chat sessions, comparisons, versions, streaming, and operational metrics. Python/FastAPI, PostgreSQL/pgvector, RQ/Redis, LangGraph and OpenRouter power the backend; React/Vite/assistant-ui/shadcn power the frontend.
 
 Implementation exists. Acceptance evidence and remaining work are tracked in the [progress ledger](docs/progress.md); this is not yet a fully verified submission. IAM and public hosting are deferred.
 

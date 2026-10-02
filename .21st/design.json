@@ -8,7 +8,8 @@
       "Vite",
       "TypeScript",
       "Tailwind v4",
-      "shadcn/Radix"
+      "shadcn/Radix",
+      "assistant-ui 0.15.23"
     ]
   },
   "sources": {
@@ -51,7 +52,8 @@
   "components": {
     "installed": [],
     "preferredPrimitives": [
-      "existing shadcn/Radix button, dialog, input"
+      "existing shadcn/Radix button, dialog, input",
+      "assistant-ui Thread, Message, Composer, Suggestion, ActionBar.Reload"
     ],
     "patterns": [
       "single sidebar with nested Agent runs",
@@ -84,6 +86,10 @@
     {
       "date": "2026-10-02",
       "choice": "User requested an icon-only + source picker, a small sparkle beside the new-run heading, and per-run hover/focus/touch menus for rename and confirmed deletion."
+    },
+    {
+      "date": "2026-10-02",
+      "choice": "Use assistant-ui External Store Runtime for the chat with existing Python SSE and SQL history. Preserve neutral styling, citation drawer, + source picker, and sidebar-only run management."
     }
   ],
   "evidence": [
@@ -102,6 +108,10 @@
     {
       "fact": "catalog-search-unavailable",
       "source": "21st search --context auto returned HTTP 401; no catalog component installed"
+    },
+    {
+      "fact": "assistant-ui-runtime-contract",
+      "source": "https://www.assistant-ui.com/docs/runtimes/custom/external-store"
     }
   ],
   "generatedAt": "2026-10-02T12:38:25.069Z"

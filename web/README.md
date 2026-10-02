@@ -1,6 +1,6 @@
 # DocVault web
 
-React + TypeScript + Vite dashboard with shadcn-style, locally owned Radix primitives and Tailwind CSS. The Python API owns document processing, conversations, citations, and structured answers; the frontend renders persisted API state.
+React + TypeScript + Vite dashboard with assistant-ui chat primitives, shadcn-style locally owned Radix dashboard primitives, and Tailwind CSS. The Python API owns document processing, conversations, citations, and structured answers; the frontend renders persisted API state.
 
 ```sh
 bun install --frozen-lockfile
@@ -27,8 +27,8 @@ The source selector loads every page of the document library; it has no hidden d
 
 The application polls during processing and reconnects the update WebSocket after disconnection. Markdown is rendered without raw HTML, and source identifiers become numbered citation buttons. The frontend has no provider credentials or client-side AI calls.
 
-The shadcn primitives follow [the official Vite installation](https://ui.shadcn.com/docs/installation/vite), [Radix sheet implementation](https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/new-york-v4/ui/sheet.tsx), and [Radix AlertDialog](https://ui.shadcn.com/docs/components/alert-dialog). Keeping the primitives local avoids introducing a second chat runtime alongside the Python streaming API.
+The shadcn primitives follow [the official Vite installation](https://ui.shadcn.com/docs/installation/vite), [Radix sheet implementation](https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/new-york-v4/ui/sheet.tsx), and [Radix AlertDialog](https://ui.shadcn.com/docs/components/alert-dialog). Dashboard primitives remain local. Chat uses `@assistant-ui/react` 0.15.23 [External Store Runtime](https://www.assistant-ui.com/docs/runtimes/custom/external-store) with canonical React Query messages and the existing Python SSE send/retry/cancel handlers. Thread/Message/Composer primitives manage the transcript and input; Suggestion and Reload primitives route follow-ups and latest-turn retries. Citation-aware Markdown, the source picker, clipboard failure feedback, and Past Runs menus retain their existing presentation. Python/SQL remain the history authority; there is no Assistant Cloud or frontend model call.
 
-The user selected manual browser validation on 2 October 2026. Build and transport tests passed; desktop/mobile appearance and interactive browser flows remain unverified. See [the progress ledger](../docs/progress.md) for actual evidence and outstanding gates.
+The user selected manual browser validation on 2 October 2026. Build and 17 transport/runtime tests passed; desktop/mobile appearance and interactive browser flows remain unverified. See [the progress ledger](../docs/progress.md) for actual evidence and outstanding gates.
 
 Run actions use the installed Radix [DropdownMenu primitive](https://www.radix-ui.com/primitives/docs/components/dropdown-menu), including native keyboard navigation, portaled positioning, and trigger semantics, alongside the existing dialog/confirmation components.

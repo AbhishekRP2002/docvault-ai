@@ -1,6 +1,6 @@
 # DocVault design context
 
-A light, neutral document SaaS workspace built with React, Vite, Tailwind v4, Geist, and existing shadcn/Radix primitives. Tokens live in `web/src/index.css`.
+A light, neutral document SaaS workspace built with React, Vite, Tailwind v4, Geist, assistant-ui chat primitives, and existing shadcn/Radix dashboard primitives. Tokens live in `web/src/index.css`.
 
 The desktop shell has one 232px sidebar and one main workspace. Agent contains New Run and collapsible, searchable Past Runs. A breadcrumb supplies location. New runs use a centered composer; existing runs keep the composer below the transcript. Files and Usage remain available in the same sidebar.
 
@@ -11,3 +11,5 @@ Reference: the user's second fileAI screenshot, plus [21st sidebar patterns](htt
 The source picker uses an accessible + icon with selected-file count. A small sparkle sits beside the new-run heading. Past-run menus reveal Rename/Delete on hover/focus and remain visible on touch; deletion is confirmed, and failures keep the dialog open. These were explicitly requested by the user on 2 October 2026.
 
 Rename and Delete live exclusively in the Past Runs menus. The main chat canvas has no duplicate session-management controls.
+
+Chat uses assistant-ui 0.15.23 with an External Store Runtime connected to Python history/SSE. Preserve the current spacing, neutral controls, source drawer, and citation rendering rather than importing a separate stock chat layout. The runtime owns presentation interactions; SQL owns persisted state.

@@ -15,7 +15,7 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 | LangGraph and OpenRouter generation/embeddings | Implemented; live smoke verified | Configurable provider boundary; explicit graph stages, strict output schema, real response deltas. SQL owns persistence; no LangGraph checkpointer/resume claim. |
 | Retry, regeneration, cancellation, one active generation | Implemented; API tests verified | Latest-turn regeneration retains source snapshot and bypasses answer cache; older-turn retry rejected. Admission and cancellation races covered. UI flow pending manual validation. |
 | API docs, metrics, local configuration | Implemented; partial evidence | FastAPI OpenAPI, usage and processing metrics, request logs, readiness. Metrics reconciliation and complete operations gates pending. |
-| Spec and implementation plan | Updated | Both reflect the user's UI revision and link this ledger. |
+| Spec and implementation plan | Updated | Both reflect the user's UI revision and assistant-ui integration and link this ledger. |
 
 ## All 18 bonus items
 
@@ -27,12 +27,12 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 | B04 | Categorization and tags | Implemented. Live synthetic policy has persisted category/tags. Manual filter validation pending. |
 | B05 | Key insights | Implemented with evidence IDs. Live policy insights returned HTTP 200. Human claim-support and late-document tests pending. |
 | B06 | Comparison | Implemented with per-cell source IDs and missing-information states. Full live comparison quality gate pending. |
-| B07 | Frontend/dashboard | Implemented; redesigned to one sidebar plus main workspace. Agent contains New Run and Past Runs with hover/focus/touch menus for rename and confirmed deletion. Composer uses + for source selection and a small heading sparkle. Build/typecheck pass; user chose manual browser validation. |
+| B07 | Frontend/dashboard | Implemented; redesigned to one sidebar plus main workspace. Agent contains New Run and Past Runs with hover/focus/touch menus for rename and confirmed deletion. Composer uses + for source selection and a small heading sparkle. assistant-ui 0.15.23 now powers the chat thread/composer via External Store Runtime. Build/typecheck and runtime tests pass; user chose manual browser validation. |
 | B08 | Realtime updates | Partial. WebSocket invalidations, polling/reconciliation and SSE exist; persistent database revisions and full reconnect/lifecycle matrix pending. |
 | B09 | Smart caching | Implemented with scoped answer/query/embedding/parser reuse. Deterministic cache and retry checks pass. Measured live reuse report pending. |
 | B10 | Vector database | Implemented with pgvector plus lexical search/RRF. Exact retrieval; no HNSW performance claim. 10k-chunk benchmark pending. |
 | B11 | Streaming chat | Implemented. Live run produced 39 response text deltas, then canonical persisted completion. Browser stream/reconnect validation pending. |
-| B12 | Comprehensive testing | Partial: 47 backend and six frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
+| B12 | Comprehensive testing | Partial: 47 backend tests passed previously; 17 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
 | B13 | Cost tracking/optimization | Partial. Durable actual provider usage/cost ledger, unknown-cost counts, caches and embedding microbatches exist. Versioned estimate rates and measured savings report pending. |
 | B14 | Rate limiting/quotas | Partial. Atomic Redis rate admission exists. Daily cost reservation/enforcement is not implemented; `DAILY_BUDGET_USD` currently has no enforcement. Budget/resource concurrency gates pending. |
 | B15 | Versions | Backend implemented; snapshots and retry scope verified. UI version details/upload exist. Explicit historical-version selection in the chat picker and full current-pointer stress gate pending. |
@@ -46,8 +46,8 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 |---|---|---|
 | Backend lint | `.venv/bin/ruff check src tests migrations` | Exit 0: `All checks passed!` |
 | Full backend tests | `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests -q` | Exit 0: **47 passed in 9.85s**; no skipped tests. Tests create isolated schemas; application data is preserved. PostgreSQL is real; providers and selected transport boundaries are deterministic fakes. |
-| Frontend transport tests | In `web/`: `bun test src/lib` | Exit 0: **6 passed, 0 failed, 11 assertions**. Covers split SSE frames, interrupted generation, actionable errors, and complete pagination. These are not browser tests. |
-| Frontend typecheck/build | In `web/`: `bun run typecheck`; `bun run build` | Exit 0 after redesign. Production bundle generated. |
+| Frontend transport/runtime tests | In `web/`: `bun test src/lib` | Exit 0: **17 passed, 0 failed, 36 assertions**. Covers split SSE frames, interrupted generation, actionable errors, complete pagination, persisted-status/provenance conversion, single composer dispatch, blocked sends retaining drafts, latest-turn retry routing, and backend-confirmed cancellation semantics using the published runtime and server-rendered primitives. These are not browser tests. |
+| Frontend typecheck/build | In `web/`: `bun run typecheck`; `bun run build` | Exit 0 after assistant-ui integration. Production bundle generated; lazy chat chunk 332.47 kB (98.42 kB gzip). This is a build-size observation, not a browser performance benchmark. |
 | 21st design review | `21st review web/src/App.tsx web/src/pages/chat.tsx web/src/index.css --json` | Local deterministic review executed; no errors. Composer uses a responsive maximum width, not a fixed minimum width. Dialog autofocus removed. Token-definition color suggestions are intentional. Final review: five files, zero errors/warnings; 12 informational color suggestions. |
 | Real PDF/OCR parser | Read back `/private/tmp/docvault-parser-verification.log` | Supplied assignment: 4 pages, 26 chunks with provenance. Image-only fixture: 1 page, 1 chunk, expected OCR text recovered. This does not verify the entire planned parser corpus or performance targets. |
 | Live upload/answer | `/private/tmp/docvault-api-smoke.py`; `/private/tmp/docvault-api-smoke-result.json` | Synthetic renewal policy ready; answer contains USD 1200 and 30 days; **39 deltas, 2 citations, 3 suggestions**; deltas match final content and persisted history matches. Smoke script was corrected to decode SSE event names separately from data. |
@@ -65,6 +65,16 @@ Updated: 2 October 2026. This ledger records the current repository, not just th
 - Baseline and final TypeScript checks passed; production build passed; six existing transport tests passed. `21st review` of the four changed components returned zero errors/warnings and one informational existing shadow-color suggestion.
 - Live API verification, using a newly created temporary session only: create **201**, rename **200**, persisted title matches, delete **204**, persisted session absent. No browser was driven and no model call was needed. Manual UI/menu/focus validation is pending.
 - Previous development API/UI/worker/dispatcher processes were no longer running. PostgreSQL/Redis were healthy. Replacement processes are listed below.
+
+## assistant-ui integration: 2 October 2026
+
+- Read the requested [components documentation](https://www.assistant-ui.com/components), official [External Store Runtime docs](https://www.assistant-ui.com/docs/runtimes/custom/external-store), Context7 guidance, and installed types/source. Added `@assistant-ui/react` **0.15.23** and updated the Bun lockfile.
+- Integrated Thread/Viewport/Messages, Message, Composer/Input/Send/Cancel, Suggestion, and ActionBar/Reload primitives. Removed the custom composer draft/key handling and scroll tracking. Existing styling, citation-aware Markdown/source drawer, + picker, sparkle, suggestions (at most three), and sidebar-only management stay in place. Explicit clipboard failure feedback remains a project control.
+- React Query and Python/SQL remain authoritative. Send, retry and stop use the existing APIs; no Cloud persistence, client provider request, edit/branch interface, or Node AI proxy. SSE retries replace the visible attempt rather than briefly displaying both; older attempts remain stored. A late session-create response cannot redirect the user after explicit navigation.
+- Baseline: frontend TypeScript passed, six transport tests passed. Final `bun run typecheck`, `bun run build`, and `bun test src/lib` exit 0; **17 tests, 36 assertions**. Tests exercise the actual published runtime/primitives through server rendering and public runtime methods. They do not verify browser scrolling, focus/IME, responsive appearance, or a live UI-to-model interaction.
+- `21st review web/src/pages/chat.tsx web/src/lib/assistant-runtime.ts --json`: initially found a textarea focus-outline issue; fixed with a visible focus ring. Final exit 0: **zero errors/warnings, one informational existing composer shadow-color suggestion**.
+- `bun install --frozen-lockfile` exit 0: 284 installs checked, no changes. Existing frontend page, transformed chat module, and API readiness each returned HTTP 200. Existing API/UI/worker/dispatcher PIDs checked alive; no new processes started.
+- Spec, plan, research, frontend README, design context, and AI assistance record updated together. Browser validation remains manual and pending; no automated browser was driven.
 
 ## Next work, in order
 

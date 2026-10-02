@@ -23,9 +23,11 @@ Delivery is staged, but the target includes every bonus item in section 13. The 
 | Limits | Configurable upload safeguards: 25 MiB/file, 100 PDF pages, 10 files/batch, 100 MiB total/batch. No extracted-token cap per file and no fixed maximum selected versions for chat/comparison. Evidence-token tuning is deferred; provider context/input limits still apply explicitly. |
 | Demo quotas | One shared local workspace: configurable 100 logical documents, 1 GiB source storage, 20 uploads/hour, 20 chat requests/minute, and a provisional USD 5 daily AI budget. These are resource controls, not identity boundaries. |
 | Identity | IAM is entirely deferred. No application authentication, API-key layer, user accounts, tenant isolation, or multi-tenant tests in this phase. All local clients share the same documents and chats. |
-| Frontend | React + TypeScript + Vite with shadcn/ui components and direct Python SSE integration. One compact sidebar and one main workspace. Files holds the library; Agent contains New Run and nested Past Runs. Usage exposes operational metrics. Versions, insights, and comparison remain integrated with files and runs. |
+| Frontend | React + TypeScript + Vite with assistant-ui chat primitives, shadcn/ui dashboard components, and direct Python SSE integration. One compact sidebar and one main workspace. Files holds the library; Agent contains New Run and nested Past Runs. Usage exposes operational metrics. Versions, insights, and comparison remain integrated with files and runs. |
 | Orchestration | Compiled LangGraph workflows coordinate ordinary Python functions. PostgreSQL owns durable jobs, messages, and stage checkpoints; RQ transports jobs. A LangGraph checkpointer is initially deferred. |
 | Ambiguous bonus | Choose **key insight extraction**, which satisfies the assignment's “sentiment analysis or key insight extraction” alternative. Generic sentiment is not useful for every document. |
+
+The chat uses `@assistant-ui/react` 0.15.23 with [External Store Runtime](https://www.assistant-ui.com/docs/runtimes/custom/external-store). React Query supplies canonical Python history and SSE updates; the runtime controls thread rendering, scrolling, composer input/send/cancel, suggestion triggers, and latest-answer reload. Source selection, citation rendering, explicit clipboard errors, and sidebar run management remain project components. SQL owns persisted sessions and attempts. No Assistant Cloud, Node AI proxy, edit/branch UI, or client-side provider call is introduced.
 
 Arbitrary remote-URL ingestion, archives, handwriting guarantees, chart understanding, collaborative sharing, and IAM are outside this phase. Unsupported content must be visible to the user. A document can be text-searchable without the system understanding its charts.
 
@@ -76,7 +78,7 @@ flowchart LR
 | AI | OpenAI Python SDK pointed at OpenRouter. Configurable `openai/gpt-4.1-mini` generation and `openai/text-embedding-3-small` embeddings, initially 1,536 dimensions after verification. |
 | Storage | Private local volume shared by API/worker on the single demo host; a small storage interface permits S3 later. Local storage is sufficient for the assignment. |
 | Cache | Redis TTL keys for embedding inputs and exact response reuse; PostgreSQL remains authoritative. |
-| UI | React + TypeScript + Vite + shadcn/ui. Fetch JSON/SSE directly from FastAPI; use shared or generated API types where practical. |
+| UI | React + TypeScript + Vite + assistant-ui + shadcn/ui. Fetch JSON/SSE directly from FastAPI; use shared or generated API types where practical. |
 | Checks | pytest, HTTPX, Ruff; real PostgreSQL/Redis integration checks; focused Playwright UI flows. |
 
 LangGraph is workflow orchestration, RQ is job transport, and PostgreSQL is the durable authority. Compile graphs without a checkpointer initially: invocation state is transient, SQL history is loaded explicitly, and application stage checkpoints decide which ingestion work to reuse after a retry. This does not provide automatic LangGraph checkpoint resume, token replay, or exactly-once model calls. Avoid graph-level retries that multiply the database-owned retry policy. [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
@@ -350,6 +352,6 @@ Milestones refer to [implementation-plan.md](implementation-plan.md). Every bonu
 
 ## 14. Remaining validation and deferred decisions
 
-Implementation proceeds with the approved OpenRouter, LangGraph, RQ, and React/Vite/shadcn direction. The provider key is reported configured; live model access, embedding dimensions, parser resource consumption, and streaming/schema compatibility still require recorded checks. No reference images were attached, so the interface uses an original, coherent library/chat design rather than a claimed visual match.
+Implementation proceeds with the approved OpenRouter, LangGraph, RQ, and React/Vite/assistant-ui/shadcn direction. Live provider/parser smoke results and remaining quality/resource gates are recorded in [progress.md](progress.md). The UI follows the user-supplied fileAI reference with one sidebar and one main canvas; the user selected manual browser validation.
 
 Submission timing remains to be confirmed. IAM, public hosting, LangGraph checkpointer persistence, and measured evidence-token tuning are deferred. All 18 bonus features remain in the target. The living implementation plan distinguishes work in progress from verified behavior.
