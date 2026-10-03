@@ -17,6 +17,7 @@ MIME_TYPES = {
 
 
 def storage_file(key: str) -> Path:
+    """Resolve a storage key within the configured root and reject paths escaping it."""
     root = get_settings().storage_path.resolve()
     target = (root / key).resolve()
     if not target.is_relative_to(root):
@@ -25,6 +26,10 @@ def storage_file(key: str) -> Path:
 
 
 async def store_upload(upload: UploadFile) -> dict:
+    """Stream, hash, and validate an upload before adopting its private storage file.
+
+    Enforce byte and format safeguards and remove partial files on failure.
+    """
     filename = Path((upload.filename or "document").replace("\\", "/")).name
     suffix = Path(filename).suffix.lower()
     if suffix not in MIME_TYPES:
@@ -64,6 +69,7 @@ async def store_upload(upload: UploadFile) -> dict:
 
 
 def validate_file(path: Path, suffix: str):
+    """Check PDF headers, UTF-8 text, or DOCX container structure and expansion safeguards."""
     with path.open("rb") as stream:
         prefix = stream.read(1024)
     if suffix == ".pdf" and b"%PDF-" not in prefix:

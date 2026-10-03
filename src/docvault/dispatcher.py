@@ -10,6 +10,7 @@ from docvault.jobs import dispatch_once
 
 
 def main() -> None:
+    """Poll durable job dispatch and recovery, retrying dependency outages until interrupted."""
     logging.basicConfig(level=logging.INFO)
     try:
         while True:

@@ -14,7 +14,7 @@ The feature-by-feature implementation ledger is [progress.md](progress.md). It i
 |---|---|---|
 | Specification and research | Implemented | Approved LangGraph/RQ/OpenRouter decisions and all 18 bonuses retained. UI contract updated to the user's two-column reference. |
 | M0 provider/parser feasibility | Partially verified | Real embedding/structured-stream smoke; read-back parser log confirms four-page PDF and image-only OCR. Full corpus/resource benchmarks pending. |
-| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; 53 backend tests pass with database integration enabled; file-scoped processing Pyright check passes. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
+| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; 54 backend tests pass with database integration enabled; file-scoped processing Pyright check passes. All 157 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
 | M4 insights/customization | Implemented; partially verified | Structured analysis and summary artifact code plus deterministic tests. Live coverage/long-document review pending. |
 | M5 comparison/cache/quotas | Partially implemented | Comparison, scoped caches and reuse implemented. Daily budget reservations and full quota gates pending; DAILY_BUDGET_USD currently has no enforcement. |
 | M6 frontend | Implemented; browser validation pending | Two-column SaaS shell, Files, Usage, Agent/New Run/Past Runs. assistant-ui External Store Runtime integrates the Python SSE/history with thread/composer primitives, scroll-to-bottom, Radix icon tooltips and streaming MarkdownText. Typecheck/build and 32 transport/runtime/rendering tests pass. User chose manual browser validation. |
@@ -22,6 +22,8 @@ The feature-by-feature implementation ledger is [progress.md](progress.md). It i
 | M7 evaluation/submission | Pending | Frozen evaluation corpus/results, performance benchmark, clean Compose reproduction and demo recording/walkthrough remain; AI_USAGE.md now records actual assistance. |
 
 Record actual commands and evidence in [progress.md](progress.md). Passing deterministic provider tests verifies application behavior, not model quality. No entire milestone or bonus is complete solely because its code exists.
+
+Maintain concise, behavior-specific docstrings for every function and method under `src/docvault`, including nested callbacks. Describe inputs/outputs, side effects, or failure handling where they help explain the contract. For documentation-only edits, audit coverage and compare executable ASTs against the pre-edit source; run backend lint and relevant existing checks without changing behavior.
 
 ### Responsibility map
 
@@ -127,6 +129,7 @@ This is a responsibility map, not a requirement to create empty files up front. 
 - Commit accepted versions and durable jobs together. Implement dispatcher publication, worker database claim/lease/fencing, checkpoints, bounded retry decisions, and stale-job recovery.
 - Connect a compiled LangGraph ingestion workflow: canonical parsing -> source-aware chunks -> model-safe embedding microbatches -> staging index -> atomic ready activation. Re-run the graph using persisted application stage checkpoints and completed artifacts/batches after recovery. A missing LangGraph checkpointer does not provide automatic graph-state resume.
 - Keep byte/page upload safeguards, but add no whole-file extracted-token cap. Split every embedding input under the verified provider input limit and preserve complete source coverage.
+- Current parsing and chunk construction both live in `ai/parsing.py`: Docling converts PDF/DOCX and TXT is read directly; custom `chunk_blocks` uses a 600-token budget including filename/heading context, contiguous prose splits without overlap, row-based table splits with repeated headers, and compatible adjacent PDF/DOCX prose packing. It does not use Docling HybridChunker. Keep provenance through splits/merges; defer overlap and alternative chunkers to measured retrieval evaluation. `processing.py` persists chunks and embeds missing inputs.
 - Implement list/detail/version/content/status/retry endpoints, document deletion/cleanup, baseline statistics and processing-history APIs. Add batch membership/result records.
 - Persist original source locations and normalize PDF/DOCX/TXT citation locators. Reuse computed values through independently owned per-version artifacts/chunks so deletion cannot damage another live resource. Capture provider usage at the call boundary from the first billable call.
 

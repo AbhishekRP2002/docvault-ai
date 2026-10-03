@@ -30,4 +30,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Load and cache validated configuration from environment variables and the local .env."""
     return Settings()

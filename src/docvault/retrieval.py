@@ -25,6 +25,7 @@ def calculate_rrf(rankings: list[list[str]], constant: int = 60) -> list[str]:
 
 
 def chunk_evidence(chunk: Chunk, version) -> Evidence:
+    """Combine stored chunk content and source metadata into a citation-ready evidence record."""
     return Evidence(
         id=chunk.id,
         document_id=version.document_id,
@@ -37,6 +38,10 @@ def chunk_evidence(chunk: Chunk, version) -> Evidence:
 
 
 async def retrieve(query: str, version_ids: list[str], ai) -> list[Evidence]:
+    """Fuse scoped cosine and full-text rankings into evidence with selected-source coverage.
+
+    Reuse query embeddings and reject versions indexed with a different embedding model.
+    """
     settings = get_settings()
     with session() as db:
         versions = require_versions(db, version_ids)
@@ -82,6 +87,7 @@ async def retrieve(query: str, version_ids: list[str], ai) -> list[Evidence]:
 
 
 def citation(evidence: Evidence) -> dict:
+    """Build a public citation payload from an evidence record and its original text and location."""
     return dict(
         citation_id=evidence.id,
         document_id=evidence.document_id,

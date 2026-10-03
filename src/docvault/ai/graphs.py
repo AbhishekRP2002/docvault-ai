@@ -35,12 +35,14 @@ class ChatState(TypedDict, total=False):
 
 
 def validate_citations(citation_ids: list[str], evidence: list[Evidence]) -> None:
+    """Reject IDs outside the supplied evidence; this does not verify claim support."""
     allowed = {item.id for item in evidence}
     if set(citation_ids) - allowed:
         raise InvalidCitationError("The generated result referenced an unknown source.")
 
 
 def evidence_payload(evidence: list[Evidence]) -> str:
+    """Serialize source passages and their metadata as Unicode-preserving JSON."""
     return json.dumps([item.model_dump() for item in evidence], ensure_ascii=False)
 
 
@@ -51,6 +53,12 @@ async def run_chat(
     ai: OpenRouterAI,
     on_delta: DeltaCallback,
 ) -> tuple[Answer, list[Evidence], str]:
+    """Run question rewriting, retrieval, generation, and citation validation.
+
+    Return the validated answer, retrieved evidence, and standalone query. Model
+    text reaches on_delta provisionally; the caller owns persistence. An empty
+    question or invalid source references fail instead of returning an answer.
+    """
     if not question.strip():
         raise ValueError("A question is required.")
     # Caller supplies persisted conversational turns, never system instructions.
@@ -61,6 +69,7 @@ async def run_chat(
     ]
 
     async def rewrite(state: ChatState) -> dict:
+        """Resolve follow-up references with the model, or request clarification."""
         if not state["history"]:
             return {"query": state["question"], "clarification": ""}
         result = await ai.structured(
@@ -95,6 +104,7 @@ async def run_chat(
         }
 
     async def retrieval(state: ChatState) -> dict:
+        """Retrieve fresh evidence unless clarification is needed; reject conflicting IDs."""
         if state["clarification"]:
             return {"evidence": []}
         found = await retrieve(state["query"])
@@ -107,6 +117,7 @@ async def run_chat(
         return {"evidence": list(unique.values())}
 
     async def generate(state: ChatState) -> dict:
+        """Stream a grounded model answer, or return a local clarification or no-evidence result."""
         if state["clarification"]:
             return {
                 "answer": Answer(
@@ -159,6 +170,7 @@ async def run_chat(
         return {"answer": answer}
 
     def validate(state: ChatState) -> dict:
+        """Require valid sources for answered results and deduplicate citation IDs in order."""
         answer = state["answer"]
         validate_citations(answer.citation_ids, state["evidence"])
         if answer.outcome == "answered" and not answer.citation_ids:

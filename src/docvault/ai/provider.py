@@ -19,6 +19,7 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 
 class ProviderError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool = False):
+        """Attach a retry decision to a caller-safe provider error message."""
         super().__init__(message)
         self.retryable = retryable
 
@@ -33,9 +34,11 @@ def token_count(text: str) -> int:
 
 
 def strict_schema(schema: type[BaseModel]) -> dict:
+    """Derive an OpenRouter strict response format from a Pydantic model's JSON schema."""
     result = schema.model_json_schema()
 
     def visit(value):
+        """Remove defaults and require declared object fields recursively in the schema copy."""
         if isinstance(value, dict):
             value.pop("default", None)
             if value.get("type") == "object":
@@ -69,6 +72,7 @@ def response_prefix(raw: str) -> str:
     offset = 0
 
     def whitespace(index):
+        """Return the next non-whitespace offset in the current JSON buffer."""
         while index < len(raw) and raw[index].isspace():
             index += 1
         return index
@@ -150,6 +154,11 @@ class OpenRouterAI:
         context_tokens: int = 128_000,
         max_output_tokens: int = 4096,
     ):
+        """Configure an asynchronous client with explicit model capacities and no SDK retries.
+
+        Reject a missing key or invalid output reservation before any API request.
+        The optional usage callback receives accounting for attempted provider calls.
+        """
         if not api_key:
             raise ProviderError("Set OPENROUTER_API_KEY to enable AI operations.")
         if context_tokens <= max_output_tokens or max_output_tokens < 1:
@@ -168,9 +177,11 @@ class OpenRouterAI:
         self.on_usage = on_usage
 
     async def close(self) -> None:
+        """Release the underlying asynchronous HTTP client's resources."""
         await self.client.close()
 
     def _parameters(self, schema: type[BaseModel], messages: list[dict]) -> dict:
+        """Build strict-generation parameters and reject estimated model context overflow."""
         response_format = strict_schema(schema)
         # Include schema and a margin for message framing in the context check.
         estimate = token_count(json.dumps(messages, ensure_ascii=False))
@@ -189,6 +200,10 @@ class OpenRouterAI:
         }
 
     async def _usage(self, result: dict, operation: str, started: float, status: str) -> None:
+        """Send normalized provider accounting and elapsed time to the optional async callback.
+
+        Unreported usage remains unknown; embeddings have no output tokens.
+        """
         if self.on_usage is None:
             return
         usage = result.get("usage") or {}
@@ -212,6 +227,7 @@ class OpenRouterAI:
 
     @staticmethod
     def _error(exc: Exception) -> ProviderError:
+        """Translate SDK failures into safe messages and classify connection/429/5xx retries."""
         if isinstance(exc, (APIConnectionError, APITimeoutError)):
             return ProviderError("The AI provider could not be reached.", retryable=True)
         if isinstance(exc, APIStatusError):
@@ -222,6 +238,11 @@ class OpenRouterAI:
         return ProviderError("The AI provider returned an invalid response.")
 
     async def structured(self, schema: type[Schema], messages: list[dict]) -> Schema:
+        """Request one schema-constrained completion and return the validated model instance.
+
+        Report usage even on failure; refusals, incomplete output, provider errors,
+        and schema validation failures propagate to the caller.
+        """
         parameters = self._parameters(schema, messages)
         started, result, status = time.monotonic(), {}, "failed"
         try:
@@ -239,6 +260,11 @@ class OpenRouterAI:
             await self._usage(result, "generation", started, status)
 
     async def stream_answer(self, messages: list[dict], on_delta: DeltaCallback) -> Answer:
+        """Emit provisional response-field deltas and return the fully validated answer.
+
+        Reject refusals, truncated streams, and inconsistent text. Close the
+        provider stream and report available usage on completion or failure.
+        """
         parameters = self._parameters(Answer, messages)
         started, result, status = time.monotonic(), {}, "failed"
         raw, emitted, finish_reason = "", "", None
@@ -277,6 +303,11 @@ class OpenRouterAI:
             await self._usage(result, "generation", started, status)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed ordered inputs in batches of at most 64 texts and 32,000 estimated tokens.
+
+        Reject blank or oversized inputs and invalid response indices, dimensions,
+        or nonfinite vector values. Record provider usage separately for each batch.
+        """
         if not texts:
             return []
         batches, batch, batch_tokens = [], [], 0

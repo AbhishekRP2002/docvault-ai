@@ -22,10 +22,12 @@ from docvault.storage import storage_file
 
 
 def parsed_path(version_id: str) -> Path:
+    """Return the workspace path for a version's canonical parsed JSON."""
     return storage_file(f"parsed/{version_id}.json")
 
 
 def parser_fingerprint(version: Version) -> str:
+    """Hash the source identity and parser, chunker, and OCR configuration for reuse."""
     parser = "utf8-v1"
     if version.mime_type != "text/plain":
         parser = f"docling-{importlib.metadata.version('docling')}"
@@ -41,6 +43,10 @@ def parser_fingerprint(version: Version) -> str:
 
 
 def _read_parsed(version_id: str, fingerprint: str) -> ParsedDocument | None:
+    """Load a valid parsed artifact only when its saved fingerprint matches.
+
+    Missing, outdated, or invalid artifacts are treated as cache misses.
+    """
     path = parsed_path(version_id)
     try:
         if path.with_suffix(".fingerprint").read_text() != fingerprint:
@@ -51,6 +57,10 @@ def _read_parsed(version_id: str, fingerprint: str) -> ParsedDocument | None:
 
 
 def _write_parsed(version_id: str, parsed: ParsedDocument, fingerprint: str, token: int) -> None:
+    """Atomically replace the parsed JSON, then write its reuse fingerprint.
+
+    Flush the temporary file to disk and remove it even if writing fails.
+    """
     path = parsed_path(version_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{token}.tmp")
@@ -66,6 +76,7 @@ def _write_parsed(version_id: str, parsed: ParsedDocument, fingerprint: str, tok
 
 
 def _require_artifact(db: Session, artifact_id: str) -> Artifact:
+    """Return an existing artifact or signal that its source resource was removed."""
     artifact = db.get(Artifact, artifact_id)
     if artifact is None:
         raise SourceDeleted("The artifact no longer exists.")
@@ -73,6 +84,10 @@ def _require_artifact(db: Session, artifact_id: str) -> Artifact:
 
 
 def _set_stage(job_id: str, token: int, stage: str) -> None:
+    """Verify job ownership and commit the stage to its associated resource.
+
+    Publish a change notification after the transaction commits.
+    """
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, stage)
         if job.kind == "ingest":
@@ -86,6 +101,7 @@ def _set_stage(job_id: str, token: int, stage: str) -> None:
 
 
 def _canonical(version: Version) -> tuple[ParsedDocument, str]:
+    """Reuse matching parsed content from this or another live version, or parse the file."""
     fingerprint = parser_fingerprint(version)
     existing = _read_parsed(version.id, fingerprint)
     if existing:
@@ -115,6 +131,10 @@ def _canonical(version: Version) -> tuple[ParsedDocument, str]:
 
 
 def _prepare_chunks(job_id: str, token: int, parsed: ParsedDocument, fingerprint: str) -> None:
+    """Persist parsed chunks and move a claimed ingestion job to embedding.
+
+    Preserve vectors when ordered input hashes and the model match; refresh source locations.
+    """
     settings = get_settings()
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, "chunking")
@@ -159,6 +179,7 @@ def _prepare_chunks(job_id: str, token: int, parsed: ParsedDocument, fingerprint
 
 
 def _embedding_key(input_hash: str) -> str:
+    """Build a cache key scoped to the input hash, embedding model, and dimensions."""
     settings = get_settings()
     return "embedding:" + signature(
         [
@@ -170,6 +191,7 @@ def _embedding_key(input_hash: str) -> str:
 
 
 def _valid_vector(value) -> bool:
+    """Check that a cached vector has the configured length and finite numeric values."""
     import math
 
     return (
@@ -180,6 +202,7 @@ def _valid_vector(value) -> bool:
 
 
 def _reusable_vector(input_hash: str) -> list[float] | None:
+    """Find a valid vector in Redis or a ready, undeleted version using the same model."""
     cached = cache_get(_embedding_key(input_hash))
     if _valid_vector(cached):
         count_metric("embedding_cache_hit")
@@ -208,6 +231,7 @@ def _reusable_vector(input_hash: str) -> list[float] | None:
 
 
 def _save_vectors(job_id: str, token: int, vectors: dict[str, list[float]]) -> None:
+    """Persist vectors under the current job claim, then cache them by embedding input."""
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, "embedding")
         for input_hash, vector in vectors.items():
@@ -224,6 +248,10 @@ def _save_vectors(job_id: str, token: int, vectors: dict[str, list[float]]) -> N
 
 
 async def _embed_missing(job_id: str, token: int, version_id: str) -> None:
+    """Reuse known vectors and embed the remaining distinct inputs in microbatches.
+
+    Checkpoint ownership before each provider batch and persist completed batches for retry.
+    """
     with session() as db:
         pending = list(
             db.scalars(
@@ -253,6 +281,7 @@ async def _embed_missing(job_id: str, token: int, version_id: str) -> None:
         batch, size = [], 0
 
         async def save_batch(items):
+            """Verify ownership, embed this batch, and save vectors keyed by input hash."""
             with session() as db, db.begin():
                 job_checkpoint(db, job_id, token, "embedding")
             values = await ai.embed([text for _, text in items])
@@ -273,6 +302,10 @@ async def _embed_missing(job_id: str, token: int, version_id: str) -> None:
 
 
 def _promote(job_id: str, token: int) -> None:
+    """Mark a fully embedded version ready and enqueue its automatic insights.
+
+    Advance the current-version pointer only when this version is at least as new.
+    """
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, "ready")
         version = require_version(db, job.resource_id)
@@ -303,6 +336,7 @@ def _promote(job_id: str, token: int) -> None:
 
 
 def version_evidence(db, version_id: str) -> list[Evidence]:
+    """Load all chunks of a live, ready version as evidence in document order."""
     version = require_version(db, version_id, ready=True)
     chunks = db.scalars(select(Chunk).where(Chunk.version_id == version_id).order_by(Chunk.ordinal))
     return [
@@ -320,6 +354,10 @@ def version_evidence(db, version_id: str) -> list[Evidence]:
 
 
 async def _insights(job_id: str, token: int, version_id: str) -> None:
+    """Generate and persist full-document insights unless they are already complete.
+
+    Recheck the job claim and source readiness before saving the provider result.
+    """
     with session() as db:
         version = require_version(db, version_id, ready=True)
         if version.insight_status == "ready" and version.insights is not None:
@@ -339,6 +377,10 @@ async def _insights(job_id: str, token: int, version_id: str) -> None:
 
 
 async def _artifact(job_id: str, token: int, artifact_id: str) -> None:
+    """Generate a requested summary or comparison and persist it under the job claim.
+
+    Reuse completed artifacts and recheck the artifact and sources before publication.
+    """
     with session() as db:
         artifact = _require_artifact(db, artifact_id)
         if artifact.status == "ready" and artifact.data is not None:
@@ -373,6 +415,10 @@ async def _artifact(job_id: str, token: int, artifact_id: str) -> None:
 
 
 def _cleanup(job_id: str, token: int, document_id: str) -> None:
+    """Remove files, chunks, and insights belonging to a logically deleted document.
+
+    Cancel dependent artifacts and fence their active jobs while retaining metadata.
+    """
     with session() as db, db.begin():
         job_checkpoint(db, job_id, token, "cleanup")
         document = db.get(Document, document_id)
@@ -438,6 +484,10 @@ def _cleanup(job_id: str, token: int, document_id: str) -> None:
 
 
 async def process_job(job_id: str, token: int) -> None:
+    """Dispatch a claimed job to ingestion, insights, artifact generation, or cleanup.
+
+    Ingestion reuses parsed artifacts and vectors before publishing a complete index.
+    """
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token)
         kind, resource_id = job.kind, job.resource_id

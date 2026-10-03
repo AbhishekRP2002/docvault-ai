@@ -38,10 +38,12 @@ class DimensionFinding(StrictModel):
 
 
 def _payload(value) -> str:
+    """Encode prompt data as JSON while retaining readable Unicode characters."""
     return json.dumps(value, ensure_ascii=False)
 
 
 def _capacity(ai: OpenRouterAI) -> int:
+    """Return section capacity after prompt/output reservations, rejecting unusable contexts."""
     # Capacity follows the configured provider model. This is not a file limit or
     # a product evidence budget. Leave room for instructions, schema and output.
     usable = ai.context_tokens - ai.max_output_tokens - 2048
@@ -51,6 +53,10 @@ def _capacity(ai: OpenRouterAI) -> int:
 
 
 def _groups(records: list[dict], capacity: int) -> list[list[dict]]:
+    """Pack ordered records into estimated token budgets without dropping or truncating them.
+
+    Raise ContextLimitError when a single record cannot fit in the given capacity.
+    """
     groups, current, size = [], [], 2
     for record in records:
         record_size = token_count(_payload(record)) + 2
@@ -69,6 +75,7 @@ def _groups(records: list[dict], capacity: int) -> list[list[dict]]:
 
 
 def _source_records(chunks: list[Evidence]) -> list[dict]:
+    """Convert evidence into prompt sections retaining original citation IDs and locations."""
     return [
         {
             "text": item.text,
@@ -82,10 +89,12 @@ def _source_records(chunks: list[Evidence]) -> list[dict]:
 
 
 def _record_ids(records: list[dict]) -> set[str]:
+    """Collect source IDs permitted by the current batch of sections or reduced findings."""
     return {source for record in records for source in record["citation_ids"]}
 
 
 def _check_summary(result: DocumentInsights, available: set[str]) -> None:
+    """Reject summary or insight citations that were not available to the generating call."""
     referenced = set(result.citation_ids)
     referenced.update(source for fact in result.key_insights for source in fact.citation_ids)
     if referenced - available:
@@ -99,6 +108,12 @@ async def summarize(
     focus_areas: list[str] | None = None,
     tone: str = "neutral",
 ) -> dict:
+    """Summarize all supplied chunks through model-sized batches and recursive reduction.
+
+    Validate customization and source IDs, then return insights with coverage and
+    options metadata. Fail on invalid citations or reductions that do not shrink
+    enough to fit; no document sections are silently discarded.
+    """
     targets = {"short": 100, "medium": 250, "long": 500}
     if length not in targets or tone not in {"neutral", "executive", "plain_language"}:
         raise ValueError("Unsupported summary length or tone.")
@@ -179,6 +194,11 @@ async def _dimension(
     chunks: list[Evidence],
     dimension: str,
 ) -> DimensionFinding:
+    """Extract one comparison dimension across all supplied sections and reduce findings.
+
+    Return not_found for absent evidence. Supported findings retain original
+    citations; invalid IDs and reductions that fail to shrink raise errors.
+    """
     if not chunks:
         return DimensionFinding(
             text="No supporting information was found.", status="not_found", citation_ids=[]
@@ -237,6 +257,11 @@ async def compare(
     evidence_by_version: dict[str, list[Evidence]],
     dimensions: list[str],
 ) -> dict:
+    """Build a cited cell for each requested dimension and selected document version.
+
+    Require at least two versions, nonempty dimensions, and correctly scoped
+    evidence. Return rows with explicit missing-information cells and coverage.
+    """
     if len(evidence_by_version) < 2:
         raise ValueError("Choose at least two document versions to compare.")
     if not dimensions or any(not dimension.strip() for dimension in dimensions):

@@ -147,9 +147,9 @@ stateDiagram-v2
 
 ## 5. Parsing, chunking, and insights
 
-**Conversion:** preserve native text where reliable and apply OCR to relevant image regions. Keep headings, reading order, paragraphs, lists, tables, page locations, and available bounding boxes in a canonical artifact. TXT receives line/character locations; DOCX uses heading/paragraph/table locations because it has no stable intrinsic page numbering. English OCR is configured explicitly. Chart/diagram interpretation is not implied by OCR.
+**Conversion:** use Docling for PDF/DOCX conversion, with English RapidOCR and table extraction enabled for PDFs. Read TXT directly as UTF-8. Preserve native text where reliable and apply OCR to relevant image regions. Keep headings, reading order, paragraphs, lists, tables, page locations, and available bounding boxes in a canonical artifact. TXT receives line/character locations; DOCX uses heading/paragraph/table locations because it has no stable intrinsic page numbering. Chart/diagram interpretation is not implied by OCR.
 
-**Chunking:** start with structure-aware chunks of approximately 600 tokens, counting heading context within the budget. Keep tables intact when possible; otherwise split by rows with repeated headers. Use small overlap only for oversized prose splits, not universally. Each chunk retains its original text, contextualized embedding text, source item IDs, exact spans, heading path, page locations, and checksum. Preserve a mapping from normalized text to source spans so citations do not rely on reconstructed offsets.
+**Chunking:** the current implementation uses the custom structure-aware, token-bounded `chunk_blocks` in `src/docvault/ai/parsing.py`, rather than Docling's HybridChunker. The 600-token chunk budget includes filename and heading context; it is not a whole-file token limit. Split oversized prose near newline, sentence, or word boundaries with no overlap. Keep tables intact when possible; otherwise split by rows with repeated usable headers, splitting oversized rows when necessary. Pack adjacent PDF/DOCX prose with matching page and heading context when the combined input fits the budget. Each chunk retains original text, contextualized embedding text, source locations and spans; persisted chunks also carry an input checksum. Preserve the source mapping through merges. Any overlap or alternative chunker is deferred until retrieval evaluation justifies it.
 
 **Embedding:** call OpenRouter's embeddings endpoint through the OpenAI SDK. Send arrays of missing inputs, batching by the configured model/provider's verified per-input and per-request limits. Split oversized inputs without losing source coverage; never depend on a provider silently truncating text. Persist each completed batch. Cache exact input/model/dimension signatures in the local workspace. Batch size and concurrency are independent controls.
 
@@ -303,6 +303,8 @@ Readiness does not make paid model calls. Expose configured-provider status sepa
 ## 12. Verification and acceptance gates
 
 These are proposed targets, not measured results. Keep a tuning corpus separate from a frozen acceptance set. Include synthetic, redistributable documents with exact facts and evidence locations; use no confidential source material.
+
+**Code documentation:** every Python backend function and method under `src/docvault`, including nested callbacks, has a concise docstring describing its actual behavior. Explain returns, side effects and failure cases when useful. Preserve this coverage as code changes; documentation-only edits must leave executable behavior unchanged.
 
 | Area | Release criterion |
 |---|---|

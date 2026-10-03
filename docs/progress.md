@@ -32,7 +32,7 @@ Updated: 4 October 2026. This ledger records the current repository, not just th
 | B09 | Smart caching | Implemented with scoped answer/query/embedding/parser reuse. Deterministic cache and retry checks pass. Measured live reuse report pending. |
 | B10 | Vector database | Implemented with pgvector `cosine_distance`, PostgreSQL full-text search and application `calculate_rrf` fusion. Exact retrieval; native HNSW/IVFFlat indexing is benchmark-gated. Four fusion unit cases and cited-chat/retry API checks pass. 10k-chunk benchmark pending. |
 | B11 | Streaming chat | Implemented. Live run produced 39 response text deltas, then canonical persisted completion. Browser stream/reconnect validation pending. |
-| B12 | Comprehensive testing | Partial: 53 backend tests pass; 32 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
+| B12 | Comprehensive testing | Partial: 54 backend tests pass; 32 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
 | B13 | Cost tracking/optimization | Partial. Durable actual provider usage/cost ledger, unknown-cost counts, caches and embedding microbatches exist. Versioned estimate rates and measured savings report pending. |
 | B14 | Rate limiting/quotas | Partial. Atomic Redis rate admission exists. Daily cost reservation/enforcement is not implemented; `DAILY_BUDGET_USD` currently has no enforcement. Budget/resource concurrency gates pending. |
 | B15 | Versions | Backend implemented; snapshots and retry scope verified. UI version details/upload exist. Explicit historical-version selection in the chat picker and full current-pointer stress gate pending. |
@@ -45,7 +45,7 @@ Updated: 4 October 2026. This ledger records the current repository, not just th
 | Check | Command or retained evidence | Actual outcome |
 |---|---|---|
 | Backend lint | `.venv/bin/ruff check src tests migrations` | Exit 0: `All checks passed!` |
-| Full backend tests | `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests -q` | Exit 0: **53 passed in 12.32s**; no skipped tests. Tests create isolated schemas; application data is preserved. PostgreSQL is real; providers and selected transport boundaries are deterministic fakes. |
+| Full backend tests | `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests -q --tb=short` | Exit 0 on 4 October: **54 passed in 9.94s**; no skipped tests. Tests create isolated schemas; application data is preserved. PostgreSQL is real; providers and selected transport boundaries are deterministic fakes. |
 | Frontend transport/runtime tests | In `web/`: `bun test src/lib` | Exit 0: **32 passed, 0 failed, 78 assertions**. Covers split SSE frames, interrupted generation, actionable errors, complete pagination, persisted-status/provenance conversion, single composer dispatch, blocked sends retaining drafts, latest-turn retry routing, backend-confirmed cancellation semantics, and thinking-indicator visibility for waiting/streaming/terminal/optimistic messages using the published runtime and server-rendered primitives. Seven added runtime/server-render checks cover numbered citations, GFM/code controls, safe links/raw-HTML exclusion, unresolved citation IDs, the static document renderer, hidden-at-bottom scroll state, and tooltip icon names. These are not browser tests. |
 | Frontend typecheck/build | In `web/`: `bun run typecheck`; `bun run build` | Exit 0 after assistant-ui integration. Production bundle generated; lazy chat chunk 350.06 kB (104.32 kB gzip). This is a build-size observation, not a browser performance benchmark. |
 | 21st design review | `21st review web/src/App.tsx web/src/pages/chat.tsx web/src/index.css --json` | Local deterministic review executed; no errors. Composer uses a responsive maximum width, not a fixed minimum width. Dialog autofocus removed. Token-definition color suggestions are intentional. Final review: five files, zero errors/warnings; 12 informational color suggestions. |
@@ -55,6 +55,12 @@ Updated: 4 October 2026. This ledger records the current repository, not just th
 | Browser validation | User response on 2 October 2026 | **Manual validation selected. Agent did not drive the browser.** Desktop/mobile appearance and interactive flow remain unverified. |
 
 21st catalog search returned HTTP 401. Public [sidebar guidance](https://docs.21st.dev/blog/react-sidebar-component-examples) informed nested navigation; project shadcn/Radix primitives were reused. No catalog component is claimed installed. Durable design choices live in [`.21st/design.json`](../.21st/design.json).
+
+## Backend method documentation: 4 October 2026
+
+- Added **149 docstrings**, bringing coverage to **157/157 Python backend functions and methods** under `src/docvault`, including nested callbacks. Preserved all eight existing docstrings and unrelated local changes. Descriptions cover purpose, returns, side effects and failure handling where useful; tests, migrations and frontend functions are outside this documentation scope.
+- Compared executable ASTs with a pre-edit snapshot across all **28 backend Python files**: exit 0, no executable changes. `.venv/bin/ruff check src tests migrations` and `git diff --check` exited 0. The full backend suite exited 0: **54 passed in 9.94s** against isolated local test schemas with fake providers; no new live model or browser verification.
+- Clarified the parser/chunker contract in the spec, plan and research: Docling handles PDF/DOCX conversion and PDF OCR; TXT is read directly. Custom `chunk_blocks` performs structure-aware, token-bounded chunking with a 600-token budget including filename/heading context, no prose overlap, repeated table headers and compatible adjacent prose packing. Docling HybridChunker is not used; overlap/alternative chunkers remain evaluation-gated.
 
 ## Worker result typing fix: 4 October 2026
 

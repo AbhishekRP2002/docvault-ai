@@ -23,6 +23,7 @@ class MessageCreate(InputModel):
     @field_validator("content")
     @classmethod
     def nonempty(cls, value):
+        """Trim question whitespace and reject an empty message before admission."""
         if not value.strip():
             raise ValueError("Enter a question.")
         return value.strip()

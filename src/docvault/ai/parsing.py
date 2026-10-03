@@ -57,6 +57,11 @@ def split_spans(text: str, max_tokens: int) -> list[tuple[int, int]]:
 
 
 def _table_pieces(text: str, capacity: int) -> list[tuple[str, dict]]:
+    """Split Markdown tables by rows, repeating headers when they fit the token capacity.
+
+    Return text with row or character locations. Oversized rows are split within
+    the row; unrecognized tables or large headers fall back to character spans.
+    """
     rows = text.splitlines(keepends=True)
     if len(rows) < 3 or not re.match(r"^[\s|:\-]+$", rows[1]):
         return [
@@ -97,6 +102,12 @@ def _table_pieces(text: str, capacity: int) -> list[tuple[str, dict]]:
 
 
 def chunk_blocks(blocks: list[Block], filename: str) -> list[ParsedChunk]:
+    """Create located chunks with a 600-token target including filename/heading context.
+
+    Prose splits have no fixed overlap; table pieces repeat usable headers.
+    Adjacent PDF/DOCX prose is packed when heading and page metadata match,
+    retaining the source mappings for each item.
+    """
     chunks: list[ParsedChunk] = []
     for block in blocks:
         if not block.text.strip():
@@ -193,6 +204,11 @@ def _merge_document_chunks(chunks: list[ParsedChunk]) -> list[ParsedChunk]:
 
 
 def parse_text(text: str, filename: str) -> ParsedDocument:
+    """Chunk decoded text with heading context and exact character/line locations.
+
+    Preserve the complete input text without a file token cap. Null bytes or an
+    absence of readable text raise ValueError.
+    """
     if "\x00" in text:
         raise ValueError("The text file contains binary data.")
     # Paragraph boundaries preserve useful context, while exact offsets remain intact.
@@ -226,6 +242,10 @@ def parse_text(text: str, filename: str) -> ParsedDocument:
 
 @lru_cache(maxsize=1)
 def _converter():
+    """Build the cached Docling converter for PDF/DOCX with English PDF OCR and tables.
+
+    RapidOCR uses the torch backend. Missing parsing dependencies raise RuntimeError.
+    """
     try:
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
@@ -245,6 +265,11 @@ def _converter():
 
 
 def parse_docling_document(document, filename: str, *, is_pdf: bool) -> ParsedDocument:
+    """Turn converted Docling items into located chunks and a full Markdown representation.
+
+    Preserve headings, item IDs, and available page/box spans. DOCX has no stable
+    page count; documents with no readable items raise ValueError.
+    """
     blocks, headings = [], ()
     for item, level in document.iterate_items():
         label = str(getattr(item.label, "value", item.label))
@@ -284,6 +309,12 @@ def parse_docling_document(document, filename: str, *, is_pdf: bool) -> ParsedDo
 
 
 def parse_file(path: Path, mime_type: str, filename: str) -> ParsedDocument:
+    """Read UTF-8 TXT directly or convert local PDF/DOCX with Docling.
+
+    PDF conversion enables OCR and may download uncached model assets. Reject
+    unsupported formats, invalid TXT encoding, and incomplete conversions rather
+    than returning a partially processed document.
+    """
     if mime_type == "text/plain":
         try:
             return parse_text(path.read_text(encoding="utf-8-sig"), filename)

@@ -20,6 +20,7 @@ ACTIVE_TASKS: dict[str, asyncio.Task] = {}
 
 
 def require_chat(db, chat_id: str, lock=False) -> Chat:
+    """Return a chat, optionally row-locking it, or raise a not-found API error."""
     query = select(Chat).where(Chat.id == chat_id)
     if lock:
         query = query.with_for_update()
@@ -30,6 +31,7 @@ def require_chat(db, chat_id: str, lock=False) -> Chat:
 
 
 def message_response(message: Message) -> dict:
+    """Build the public message payload with status, sources, suggestions, and outcome."""
     return dict(
         id=message.id,
         chat_id=message.chat_id,
@@ -47,6 +49,7 @@ def message_response(message: Message) -> dict:
 
 
 def visible_messages(db, chat_id: str) -> list[Message]:
+    """Return each user turn and its newest assistant attempt in chronological order."""
     messages = list(
         db.scalars(select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at))
     )
@@ -57,6 +60,10 @@ def visible_messages(db, chat_id: str) -> list[Message]:
 def reserve_message(
     chat_id: str, content: str | None, request_key: str, retry_of: str | None = None
 ):
+    """Admit one assistant attempt with idempotency and ready-source checks.
+
+    Return its ID and a replay flag; regeneration uses only the latest turn's original sources.
+    """
     fingerprint = signature([content, retry_of])
     request_key = f"retry:{retry_of}:{request_key}" if retry_of else f"new:{request_key}"
     with session() as db, db.begin():
@@ -129,6 +136,10 @@ def reserve_message(
 
 
 def cancel_message(chat_id: str, message_id: str) -> dict:
+    """Persist cancellation of an active reply and cancel its local task when present.
+
+    Return the stored status so clients do not infer cancellation from a stop request alone.
+    """
     cancelled = False
     with session() as db, db.begin():
         require_chat(db, chat_id, lock=True)
@@ -148,6 +159,10 @@ def cancel_message(chat_id: str, message_id: str) -> dict:
 
 
 def set_failed(message_id: str, error: str, status="failed") -> dict | None:
+    """Record failure or cancellation only while the message is still active.
+
+    Return its persisted payload, or None if it no longer exists.
+    """
     with session() as db, db.begin():
         message = db.get(Message, message_id, with_for_update=True)
         if not message:
@@ -160,6 +175,10 @@ def set_failed(message_id: str, error: str, status="failed") -> dict | None:
 
 
 async def generate_message(message_id: str, emit):
+    """Stream a reserved answer, validate it, and persist its canonical completion.
+
+    Regeneration bypasses answer reuse; cancellation or deleted sources prevent late publication.
+    """
     from docvault.integrations import create_ai
 
     with session() as db, db.begin():
@@ -181,6 +200,7 @@ async def generate_message(message_id: str, emit):
     ai = create_ai(message_id)
 
     async def on_delta(value: str):
+        """Recheck active status, refresh its heartbeat, and emit a provisional text delta."""
         with session() as db, db.begin():
             current = db.get(Message, message_id)
             if not current or current.status != "streaming":
@@ -212,6 +232,7 @@ async def generate_message(message_id: str, emit):
         else:
 
             async def find_evidence(query: str):
+                """Retrieve evidence only from the versions captured by this assistant attempt."""
                 return await retrieve(query, version_ids, ai)
 
             answer, evidence, rewritten = await run_chat(
@@ -264,10 +285,15 @@ async def generate_message(message_id: str, emit):
 
 
 def encode_event(name: str, data: dict) -> str:
+    """Encode a named SSE event with a JSON payload using API-compatible value conversion."""
     return f"event: {name}\ndata: {json.dumps(jsonable_encoder(data), ensure_ascii=False)}\n\n"
 
 
 async def message_events(message_id: str, replay=False):
+    """Yield admission, response, and terminal SSE events for an assistant attempt.
+
+    Replay stored terminal results; cancel a newly started local generation on disconnect.
+    """
     with session() as db:
         message = db.get(Message, message_id)
         user = db.get(Message, message.parent_id)
@@ -284,9 +310,11 @@ async def message_events(message_id: str, replay=False):
     queue = asyncio.Queue()
 
     async def emit(name, payload):
+        """Queue a generation event for the SSE iterator to deliver."""
         await queue.put((name, payload))
 
     async def run():
+        """Run generation and always signal the end of its event queue."""
         try:
             await generate_message(message_id, emit)
         finally:

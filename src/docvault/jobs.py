@@ -34,6 +34,7 @@ class SourceDeleted(RuntimeError):
 
 
 def _document_ids(db, job: Job) -> list[str]:
+    """Resolve the source document IDs a job needs for locking and deletion checks."""
     if job.kind == "cleanup":
         return [job.resource_id]
     if job.kind in {"ingest", "insights"}:
@@ -91,6 +92,7 @@ def job_checkpoint(db, job_id: str, token: int, stage: str | None = None) -> Job
 
 
 def _resource_state(db, job: Job, state: str, error: str | None = None) -> None:
+    """Mirror job status and errors to its resource, preserving ready ingestion indexes."""
     if job.kind in {"ingest", "insights"}:
         version = db.get(Version, job.resource_id)
         if version is None or version.status == "deleted":
@@ -110,6 +112,7 @@ def _resource_state(db, job: Job, state: str, error: str | None = None) -> None:
 
 
 def _end_attempt(db, job: Job, status: str, error: str | None = None) -> None:
+    """Finish the current running attempt with its status, error, timestamp, and last stage."""
     attempt = db.scalar(
         select(JobAttempt).where(
             JobAttempt.job_id == job.id,
@@ -123,6 +126,10 @@ def _end_attempt(db, job: Job, status: str, error: str | None = None) -> None:
 
 
 def _claim(job_id: str) -> int | None:
+    """Atomically claim a due job and create an attempt with a fresh fencing token.
+
+    Return None for unavailable jobs or when their retry allowance is exhausted.
+    """
     with session() as db, db.begin():
         job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
         if not job or job.status not in {"queued", "enqueued"} or job.next_at > now():
@@ -143,6 +150,7 @@ def _claim(job_id: str) -> int | None:
 
 
 def _heartbeat(job_id: str, token: int, stop: threading.Event) -> None:
+    """Renew the running job's lease until stopped or its fencing token loses ownership."""
     interval = max(1, min(30, get_settings().lease_seconds / 3))
     while not stop.wait(interval):
         try:
@@ -164,6 +172,10 @@ def _heartbeat(job_id: str, token: int, stop: threading.Event) -> None:
 
 
 def _fail(job_id: str, token: int, exc: Exception) -> None:
+    """Finish an owned attempt and cancel, requeue, or fail it based on the error.
+
+    Apply bounded backoff to retryable errors; never overwrite another runner's claim.
+    """
     if isinstance(exc, LostClaim):
         return
     cancelled = isinstance(exc, SourceDeleted)
@@ -313,6 +325,7 @@ def dispatch_once() -> int:
 
 
 def retry_job(job_id: str) -> None:
+    """Requeue a failed job after checking its sources, resetting attempts and fencing old runners."""
     with session() as db, db.begin():
         job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
         if not job:

@@ -9,6 +9,7 @@ router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 
 @router.get("/documents")
 def document_metrics():
+    """Count live documents, their version statuses, and total source-file storage bytes."""
     with session() as db:
         docs = db.scalar(
             select(func.count()).select_from(Document).where(Document.deleted_at.is_(None))
@@ -26,6 +27,7 @@ def document_metrics():
 
 @router.get("/processing")
 def processing_metrics():
+    """Return job counts and mean/p95 completed-job durations in milliseconds."""
     with session() as db:
         counts = dict(db.execute(select(Job.status, func.count()).group_by(Job.status)).all())
         seconds = func.extract("epoch", Job.finished_at - Job.started_at) * 1000
@@ -46,6 +48,7 @@ def processing_metrics():
 
 @router.get("/usage")
 def usage_metrics():
+    """Sum recorded AI tokens and known costs, count unknown-cost calls, and report cache hits."""
     with session() as db:
         inputs, outputs, cost, requests, unknown = db.execute(
             select(

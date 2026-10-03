@@ -7,6 +7,10 @@ from docvault.errors import AppError
 
 
 def enforce_rate(operation: str, limit: int, window_seconds: int):
+    """Apply atomic fixed-window admission in Redis, or disable it for a nonpositive limit.
+
+    Reject excess requests with 429 and unavailable admission storage with 503.
+    """
     if limit <= 0:
         return
     key = f"docvault:rate:{operation}:{int(time.time()) // window_seconds}"

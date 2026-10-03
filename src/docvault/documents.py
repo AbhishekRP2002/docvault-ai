@@ -11,10 +11,12 @@ from docvault.storage import storage_file
 
 
 def advisory_lock(db, key: str):
+    """Acquire a transaction-scoped PostgreSQL advisory lock derived from a request key."""
     db.execute(select(func.pg_advisory_xact_lock(int(signature(key)[:15], 16))))
 
 
 def require_document(db, document_id: str, *, lock=False) -> Document:
+    """Return an undeleted document, optionally row-locking it, or raise a not-found error."""
     query = select(Document).where(Document.id == document_id, Document.deleted_at.is_(None))
     if lock:
         query = query.with_for_update()
@@ -25,6 +27,7 @@ def require_document(db, document_id: str, *, lock=False) -> Document:
 
 
 def require_version(db, version_id: str, *, ready=False) -> Version:
+    """Return a version of an undeleted document and optionally require a ready index."""
     version = db.scalar(
         select(Version)
         .join(Document)
@@ -40,6 +43,7 @@ def require_version(db, version_id: str, *, ready=False) -> Version:
 
 
 def require_versions(db, version_ids: list[str], *, ready=True) -> list[Version]:
+    """Validate a nonempty selection and resolve unique versions in the supplied order."""
     if not version_ids:
         raise AppError(422, "documents_required", "Select at least one document.")
     return [
@@ -48,6 +52,7 @@ def require_versions(db, version_ids: list[str], *, ready=True) -> list[Version]
 
 
 def document_response(db, doc: Document, version: Version | None = None) -> dict:
+    """Build a library payload from a document and its supplied or latest version."""
     version = version or db.get(Version, doc.latest_version_id)
     insights = version.insights or {}
     return dict(
@@ -73,6 +78,10 @@ def document_response(db, doc: Document, version: Version | None = None) -> dict
 
 
 def accept_upload(info: dict, key: str | None, document_id: str | None = None) -> dict:
+    """Persist or reuse a validated upload and create ingestion intent with the version.
+
+    Serialize duplicate requests, replay matching keys, and remove any unadopted source file.
+    """
     fingerprint = signature([info["sha256"], info["filename"], document_id])
     scoped_key = f"upload:{document_id or 'new'}:{key}" if key else None
     adopted = False

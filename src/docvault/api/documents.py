@@ -34,6 +34,7 @@ def documents(
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
+    """Return a page of live documents filtered by title and latest-version status."""
     with session() as db:
         query = (
             select(Document)
@@ -55,6 +56,7 @@ def documents(
 
 @router.post("/documents", status_code=202)
 async def upload(file: Annotated[UploadFile, File()], idempotency_key: RequestKey = None):
+    """Rate-limit and store a file, then accept or reuse its document ingestion request."""
     enforce_rate("upload", get_settings().upload_rate_per_hour, 3600)
     return accept_upload(await store_upload(file), idempotency_key)
 
@@ -63,6 +65,7 @@ async def upload(file: Annotated[UploadFile, File()], idempotency_key: RequestKe
 async def upload_batch(
     files: Annotated[list[UploadFile], File()], idempotency_key: RequestKey = None
 ):
+    """Persist or replay a validated upload batch with per-file results and staging-file cleanup."""
     if not files or len(files) > 10:
         raise AppError(422, "batch_size", "Choose between one and ten files per upload batch.")
     if sum(file.size or 0 for file in files) > 100 * 1024 * 1024:
@@ -126,6 +129,7 @@ async def upload_batch(
 
 
 def batch_response(db, batch):
+    """Serialize batch results with live document metadata, rejecting missing batches."""
     if not batch:
         raise AppError(404, "batch_not_found", "Upload batch not found.")
     items = []
@@ -143,18 +147,21 @@ def batch_response(db, batch):
 
 @router.get("/document-batches/{batch_id}")
 def get_batch(batch_id: str):
+    """Return the persisted batch results with current document metadata."""
     with session() as db:
         return batch_response(db, db.get(Batch, batch_id))
 
 
 @router.get("/documents/{document_id}")
 def document(document_id: str):
+    """Return a live document's latest-version metadata, rejecting missing or deleted IDs."""
     with session() as db:
         return document_response(db, require_document(db, document_id))
 
 
 @router.delete("/documents/{document_id}", status_code=204)
 def delete_document(document_id: str):
+    """Soft-delete a document, fence active version jobs, and persist a file-cleanup job."""
     with session() as db, db.begin():
         doc = require_document(db, document_id, lock=True)
         doc.deleted_at, doc.updated_at = now(), now()
@@ -172,6 +179,7 @@ def delete_document(document_id: str):
 
 @router.get("/documents/{document_id}/versions")
 def versions(document_id: str):
+    """List a live document's versions newest first, including processing and insight states."""
     with session() as db:
         require_document(db, document_id)
         return {
@@ -198,6 +206,7 @@ def versions(document_id: str):
 async def upload_version(
     document_id: str, file: Annotated[UploadFile, File()], idempotency_key: RequestKey = None
 ):
+    """Validate the document, rate-limit the upload, and accept or reuse the uploaded version."""
     with session() as db:
         require_document(db, document_id)
     enforce_rate("upload", get_settings().upload_rate_per_hour, 3600)
@@ -206,6 +215,7 @@ async def upload_version(
 
 @router.get("/versions/{version_id}")
 def version_detail(version_id: str):
+    """Return persisted version fields except the internal storage key."""
     with session() as db:
         v = require_version(db, version_id)
         return {
@@ -217,6 +227,7 @@ def version_detail(version_id: str):
 
 @router.get("/versions/{version_id}/content")
 def content(version_id: str, representation: str = "original"):
+    """Serve original files or extracted text, rejecting invalid or unavailable content."""
     with session() as db:
         v = require_version(db, version_id)
         if representation == "extracted":
@@ -236,6 +247,7 @@ def content(version_id: str, representation: str = "original"):
 
 @router.get("/versions/{version_id}/insights")
 def insights(version_id: str):
+    """Return the version's persisted insight state, generated data, and error."""
     with session() as db:
         v = require_version(db, version_id)
         return {"status": v.insight_status, "data": v.insights, "error": v.insight_error}
@@ -243,6 +255,7 @@ def insights(version_id: str):
 
 @router.post("/versions/{version_id}/retry", status_code=202)
 def retry_version(version_id: str):
+    """Requeue the latest failed ingestion or insight job, rejecting unavailable retries."""
     from docvault.jobs import retry_job
 
     with session() as db:
@@ -265,6 +278,7 @@ def retry_version(version_id: str):
 
 @router.get("/versions/{version_id}/chunks/{chunk_id}")
 def source(version_id: str, chunk_id: str):
+    """Return a citation for a chunk belonging to the requested ready document version."""
     with session() as db:
         v = require_version(db, version_id, ready=True)
         chunk = db.get(Chunk, chunk_id)
@@ -274,6 +288,7 @@ def source(version_id: str, chunk_id: str):
 
 
 def make_artifact(kind: str, version_ids: list[str], options: dict):
+    """Reuse or queue an artifact for ready sources, restarting previously failed results."""
     version_ids = list(dict.fromkeys(version_ids))
     if kind == "comparison" and len(version_ids) < 2:
         raise AppError(
@@ -303,16 +318,19 @@ def make_artifact(kind: str, version_ids: list[str], options: dict):
 
 @router.post("/versions/{version_id}/summaries", status_code=202)
 def summarize(version_id: str, body: SummaryCreate):
+    """Accept or reuse a customized summary job for a ready version."""
     return make_artifact("summary", [version_id], body.model_dump())
 
 
 @router.post("/comparisons", status_code=202)
 def compare(body: ComparisonCreate):
+    """Accept or reuse a comparison job for at least two distinct ready versions."""
     return make_artifact("comparison", body.version_ids, {"dimensions": body.dimensions})
 
 
 @router.get("/artifacts/{artifact_id}")
 def artifact(artifact_id: str):
+    """Return persisted result state and data after revalidating its source versions."""
     with session() as db:
         item = db.get(Artifact, artifact_id)
         if not item:
@@ -323,6 +341,7 @@ def artifact(artifact_id: str):
 
 @router.get("/jobs/{job_id}")
 def job_detail(job_id: str):
+    """Return every persisted field of a processing job, or raise if it does not exist."""
     with session() as db:
         job = db.get(Job, job_id)
         if not job:

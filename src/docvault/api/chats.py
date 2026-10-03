@@ -28,6 +28,7 @@ RequestKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=12
 
 
 def chat_response(chat):
+    """Serialize a chat's identity, selected versions, and timestamps for the API."""
     return dict(
         id=chat.id,
         title=chat.title,
@@ -39,6 +40,7 @@ def chat_response(chat):
 
 @router.get("")
 def chats():
+    """Return all persisted chat sessions, most recently updated first."""
     with session() as db:
         return {
             "items": [
@@ -50,6 +52,7 @@ def chats():
 
 @router.post("", status_code=201)
 def create_chat(body: ChatCreate):
+    """Persist a chat scoped to validated ready versions and return its metadata."""
     with session() as db, db.begin():
         versions = require_versions(db, body.version_ids)
         chat = Chat(title=body.title.strip() or "New chat", version_ids=[v.id for v in versions])
@@ -60,6 +63,7 @@ def create_chat(body: ChatCreate):
 
 @router.patch("/{chat_id}")
 def update_chat(chat_id: str, body: ChatUpdate):
+    """Persist a valid title or ready-version scope without changing existing turn snapshots."""
     with session() as db, db.begin():
         chat = require_chat(db, chat_id, lock=True)
         if body.title is not None:
@@ -77,6 +81,7 @@ def update_chat(chat_id: str, body: ChatUpdate):
 
 @router.delete("/{chat_id}", status_code=204)
 def delete_chat(chat_id: str):
+    """Delete a chat and its messages, rejecting sessions with an active generation."""
     with session() as db, db.begin():
         chat = require_chat(db, chat_id, lock=True)
         active = db.scalar(
@@ -95,6 +100,7 @@ def delete_chat(chat_id: str):
 
 @router.get("/{chat_id}/messages")
 def history(chat_id: str):
+    """Return chronological chat history with only the latest assistant attempt per turn."""
     with session() as db:
         require_chat(db, chat_id)
         return {"items": [message_response(m) for m in visible_messages(db, chat_id)]}
@@ -102,6 +108,7 @@ def history(chat_id: str):
 
 @router.get("/{chat_id}/messages/{message_id}")
 def message(chat_id: str, message_id: str):
+    """Return one persisted message, rejecting IDs outside the requested chat."""
     with session() as db:
         require_chat(db, chat_id)
         item = db.get(Message, message_id)
@@ -117,6 +124,7 @@ async def respond(
     key: str | None,
     retry_of: str | None = None,
 ):
+    """Enforce provider and rate checks, then reserve or replay a response as SSE or JSON."""
     settings = get_settings()
     if not settings.openrouter_api_key.get_secret_value():
         raise AppError(
@@ -135,6 +143,7 @@ async def respond(
     if not replay:
 
         async def ignore_event(name, payload):
+            """Discard generation events when the caller requested a single JSON response."""
             pass
 
         await generate_message(identifier, ignore_event)
@@ -146,6 +155,7 @@ async def respond(
 async def ask(
     chat_id: str, body: MessageCreate, request: Request, idempotency_key: RequestKey = None
 ):
+    """Generate or replay a reply to a new question using the requested response format."""
     return await respond(request, chat_id, body.content, idempotency_key)
 
 
@@ -153,9 +163,11 @@ async def ask(
 async def retry(
     chat_id: str, message_id: str, request: Request, idempotency_key: RequestKey = None
 ):
+    """Regenerate the latest turn using its pinned sources, or replay the idempotent request."""
     return await respond(request, chat_id, None, idempotency_key, message_id)
 
 
 @router.post("/{chat_id}/messages/{message_id}/cancel")
 async def cancel(chat_id: str, message_id: str):
+    """Stop an active assistant response, returning its state without altering finished replies."""
     return cancel_message(chat_id, message_id)

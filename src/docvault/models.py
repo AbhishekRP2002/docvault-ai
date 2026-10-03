@@ -10,10 +10,12 @@ from docvault.db import Base
 
 
 def new_id() -> str:
+    """Generate a UUID4 string for a new persisted record."""
     return str(uuid4())
 
 
 def now() -> datetime:
+    """Return the current timezone-aware UTC time for persisted timestamps."""
     return datetime.now(UTC)
 
 

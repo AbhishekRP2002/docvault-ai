@@ -1,6 +1,6 @@
 # AI assistance record
 
-Updated 3 October 2026. Codex assisted with the specification, implementation plan, research against official documentation, Python backend, LangGraph/provider integration, queue processing, React UI, tests, and documentation. The user supplied the assignment, provider preference/key locally, removed limits, deferred IAM, and corrected the initial UI direction.
+Updated 4 October 2026. Codex assisted with the specification, implementation plan, research against official documentation, Python backend, LangGraph/provider integration, queue processing, React UI, tests, and documentation. The user supplied the assignment, provider preference/key locally, removed limits, deferred IAM, and corrected the initial UI direction.
 
 Concrete corrections and checks:
 
@@ -14,8 +14,9 @@ Concrete corrections and checks:
 - Reviewed assistant-ui component opportunities using official documentation, Context7, and installed source. Implemented the approved frontend polish with runtime scroll-to-bottom, Radix-compatible icon tooltips, and streaming MarkdownText via the approved `@assistant-ui/react-markdown` dependency. Preserved citation provenance, standalone document rendering, and explicit clipboard errors. Message editing was explicitly deferred by the user; browser validation remains manual.
 - Reproduced 16 optional-value Pyright errors in the ingestion worker, added runtime missing-resource guards and explicit version narrowing, and verified zero file-scoped diagnostics plus missing-artifact/summary persistence tests. Pyright ran from a temporary cache without a project dependency.
 - Fixed two worker `Result.rowcount` type errors on 4 October using SQLAlchemy/PostgreSQL UPDATE RETURNING after checking installed 2.1.2 APIs and official documentation. Verified zero diagnostics for jobs/processing and three focused database checks for heartbeat ownership, stale-response recovery and notifications; no diagnostic suppression or dependency change.
+- Added 149 docstrings to reach 157/157 documented Python backend functions/methods, preserving executable ASTs and existing descriptions. Clarified Docling conversion versus custom token-bounded chunking in the living documents; the full 54-test backend suite and Ruff passed. No parsing/chunking behavior changed.
 - Corrected a verification script to decode SSE event names separately from payloads. The live synthetic policy answer produced 39 deltas, two citations and three suggestions; persisted history matched the final response.
 
-Executed checks and remaining gates are in [docs/progress.md](docs/progress.md). The full backend suite passed 53 tests with dedicated PostgreSQL integration enabled. Frontend transport tests, typecheck and production build passed. These checks do not establish held-out RAG quality or production readiness.
+Executed checks and remaining gates are in [docs/progress.md](docs/progress.md). The full backend suite passed 54 tests with dedicated PostgreSQL integration enabled. Frontend transport tests, typecheck and production build passed. These checks do not establish held-out RAG quality or production readiness.
 
 The user chose manual browser validation; no agent-driven browser test is claimed. Frozen evaluation, complete failure/load testing, quota enforcement, clean Compose reproduction, and the required demo remain tracked as incomplete. No provider key, private source PDF, fabricated metrics, time-saving claim, or unverified deployment is included in this repository.

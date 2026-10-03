@@ -14,16 +14,19 @@ from docvault.models import MetricBucket
 
 @lru_cache
 def redis_client() -> Redis:
+    """Return the shared Redis client with bounded connection and operation timeouts."""
     return Redis.from_url(get_settings().redis_url, socket_connect_timeout=2, socket_timeout=2)
 
 
 def signature(value) -> str:
+    """Hash a JSON-serializable value deterministically using sorted object keys."""
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
 
 
 def cache_get(key: str):
+    """Read a namespaced JSON cache value, returning None on a miss or cache failure."""
     try:
         value = redis_client().get(f"docvault:cache:{key}")
         return json.loads(value) if value else None
@@ -32,6 +35,7 @@ def cache_get(key: str):
 
 
 def cache_set(key: str, value, ttl: int = 900):
+    """Store a namespaced JSON value with an expiry; tolerate Redis unavailability."""
     try:
         redis_client().setex(f"docvault:cache:{key}", ttl, json.dumps(value))
     except RedisError:
@@ -39,6 +43,7 @@ def cache_set(key: str, value, ttl: int = 900):
 
 
 def count_metric(key: str, duration_ms: float = 0):
+    """Atomically increment a durable metric count and accumulate total and maximum duration."""
     with session() as db, db.begin():
         stmt = insert(MetricBucket).values(
             key=key, count=1, total_ms=duration_ms, max_ms=duration_ms
@@ -56,6 +61,7 @@ def count_metric(key: str, duration_ms: float = 0):
 
 
 def notify_change():
+    """Publish a Redis revision hint; tolerate outages because clients reconcile from SQL."""
     try:
         client = redis_client()
         revision = client.incr("docvault:revision")

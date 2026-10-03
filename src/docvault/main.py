@@ -26,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 @asynccontextmanager
 async def lifespan(app):
+    """Create the configured storage directory before the application serves requests."""
     get_settings().storage_path.mkdir(parents=True, exist_ok=True)
     yield
 
@@ -50,6 +51,7 @@ app.include_router(metrics.router)
 
 @app.exception_handler(AppError)
 async def app_error(request, exc):
+    """Render an application error with its request ID and a retry header for HTTP 429."""
     headers = {"Retry-After": "60"} if exc.status == 429 else None
     return JSONResponse(
         status_code=exc.status,
@@ -63,6 +65,7 @@ async def app_error(request, exc):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, exc):
+    """Return field-level validation errors without echoing submitted values."""
     # Do not echo inputs: they may contain document text or confidential questions.
     return JSONResponse(
         status_code=422,
@@ -83,6 +86,7 @@ async def validation_error(request, exc):
 
 @app.middleware("http")
 async def request_metrics(request: Request, call_next):
+    """Attach request IDs, record response-creation timing, and normalize unexpected errors."""
     request.state.request_id = str(uuid4())
     start = time.monotonic()
     try:
@@ -119,6 +123,7 @@ async def request_metrics(request: Request, call_next):
 
 @app.get("/v1/config", tags=["configuration"])
 def config():
+    """Expose selected model names and whether a provider key is configured, never the key."""
     settings = get_settings()
     return dict(
         provider="openrouter",
@@ -130,11 +135,13 @@ def config():
 
 @app.get("/health/live", tags=["health"])
 def live():
+    """Report that the API process can respond without checking its dependencies."""
     return {"status": "ok"}
 
 
 @app.get("/health/ready", tags=["health"])
 def ready():
+    """Check the migration table, Redis, worker heartbeat, and storage; return 503 if degraded."""
     checks = {}
     try:
         with get_engine().connect() as connection:
@@ -157,6 +164,7 @@ def ready():
 
 @app.get("/metrics", response_class=PlainTextResponse, tags=["metrics"])
 def prometheus():
+    """Render available workspace metrics as newline-delimited Prometheus samples."""
     data = {**metrics.document_metrics(), **metrics.processing_metrics(), **metrics.usage_metrics()}
     return (
         "\n".join(f"docvault_{key} {value}" for key, value in data.items() if value is not None)
@@ -166,6 +174,7 @@ def prometheus():
 
 @app.websocket("/v1/events")
 async def events(websocket: WebSocket):
+    """Reject disallowed origins, then emit Redis update hints and periodic snapshot revisions."""
     origin = websocket.headers.get("origin")
     if origin and origin not in get_settings().cors_origins:
         await websocket.close(code=1008)
