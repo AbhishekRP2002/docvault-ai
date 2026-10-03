@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import delete, or_, select, update
+from sqlalchemy.orm import Session
 
 from docvault.ai.insights import compare, summarize
 from docvault.ai.parsing import parse_file
@@ -13,9 +14,9 @@ from docvault.ai.types import Evidence, ParsedDocument
 from docvault.cache import cache_get, cache_set, count_metric, notify_change, signature
 from docvault.config import get_settings
 from docvault.db import session
-from docvault.documents import require_version
+from docvault.documents import require_document, require_version
 from docvault.integrations import create_ai
-from docvault.jobs import job_checkpoint
+from docvault.jobs import SourceDeleted, job_checkpoint
 from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, Version, now
 from docvault.storage import storage_file
 
@@ -64,6 +65,13 @@ def _write_parsed(version_id: str, parsed: ParsedDocument, fingerprint: str, tok
         temporary.unlink(missing_ok=True)
 
 
+def _require_artifact(db: Session, artifact_id: str) -> Artifact:
+    artifact = db.get(Artifact, artifact_id)
+    if artifact is None:
+        raise SourceDeleted("The artifact no longer exists.")
+    return artifact
+
+
 def _set_stage(job_id: str, token: int, stage: str) -> None:
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, stage)
@@ -73,7 +81,7 @@ def _set_stage(job_id: str, token: int, stage: str) -> None:
         elif job.kind == "insights":
             require_version(db, job.resource_id, ready=True).insight_status = "running"
         elif job.kind in {"summary", "comparison"}:
-            db.get(Artifact, job.resource_id).status = "running"
+            _require_artifact(db, job.resource_id).status = "running"
     notify_change()
 
 
@@ -279,7 +287,7 @@ def _promote(job_id: str, token: int) -> None:
         if missing or not version.chunk_count:
             raise ValueError("The document index is incomplete.")
         version.status, version.error, version.ready_at = "ready", None, now()
-        document = db.get(Document, version.document_id)
+        document = require_document(db, version.document_id)
         current = (
             db.get(Version, document.current_version_id) if document.current_version_id else None
         )
@@ -332,12 +340,12 @@ async def _insights(job_id: str, token: int, version_id: str) -> None:
 
 async def _artifact(job_id: str, token: int, artifact_id: str) -> None:
     with session() as db:
-        artifact = db.get(Artifact, artifact_id)
+        artifact = _require_artifact(db, artifact_id)
         if artifact.status == "ready" and artifact.data is not None:
             return
     _set_stage(job_id, token, "generating")
     with session() as db:
-        artifact = db.get(Artifact, artifact_id)
+        artifact = _require_artifact(db, artifact_id)
         evidence = {id: version_evidence(db, id) for id in artifact.version_ids}
         options, kind = artifact.options, artifact.kind
     ai = create_ai(artifact_id)
@@ -360,7 +368,7 @@ async def _artifact(job_id: str, token: int, artifact_id: str) -> None:
         await ai.close()
     with session() as db, db.begin():
         job_checkpoint(db, job_id, token)
-        artifact = db.get(Artifact, artifact_id)
+        artifact = _require_artifact(db, artifact_id)
         artifact.data, artifact.status, artifact.error = data, "ready", None
 
 
@@ -435,6 +443,8 @@ async def process_job(job_id: str, token: int) -> None:
         kind, resource_id = job.kind, job.resource_id
         version = require_version(db, resource_id) if kind == "ingest" else None
     if kind == "ingest":
+        if version is None:
+            raise ValueError("An ingestion job requires a document version.")
         if version.status != "ready":
             _set_stage(job_id, token, "parsing")
             parsed, fingerprint = _canonical(version)

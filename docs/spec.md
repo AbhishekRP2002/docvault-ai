@@ -141,6 +141,7 @@ stateDiagram-v2
 - Treat delivery as **at least once**. Unique constraints, compare-and-set transitions, and upserts make database effects idempotent. A provider call that succeeded before a crash may be billed again on retry; do not promise exactly-once external calls.
 - Retry transient network, `429`, and provider `5xx` failures up to three total attempts with backoff and jitter. Honor provider retry hints. Validation, unsupported files, and deterministic parse errors are terminal. Coordinate SDK and job retries so they do not multiply unexpectedly.
 - The dispatcher re-enqueues abandoned work after expired leases, reconciles unpublished jobs, and expires abandoned chat runs. Persist next-attempt times and enforce one retry owner. RQ is the execution transport; PostgreSQL owns recovery decisions.
+- Worker resource lookups must reject missing documents/artifacts before reading or updating their attributes. A removed artifact raises the existing source-deletion cancellation error before provider work; ingestion explicitly requires a non-null document version. Missing-row handling must remain visible rather than suppressing optional-value type diagnostics.
 - Deleting a document immediately hides it from all read/retrieval paths, fences active jobs, and schedules deletion of blobs/artifacts/chunks/caches. Historical chat text remains in its workspace, but its source links become unavailable; disclose this retention policy. Cleanup retries are idempotent and reported.
 
 ## 5. Parsing, chunking, and insights

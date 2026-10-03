@@ -10,7 +10,7 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 |---|---|---|
 | FastAPI, PostgreSQL/pgvector, Redis/RQ, private local storage | Implemented; partially verified | Database migrations applied locally; health/readiness and synthetic ingestion exercised. README local setup exists; full clean Compose startup not yet reproduced. |
 | Validated TXT/PDF/DOCX uploads, batch acceptance, immutable versions | Implemented; partially verified | API tests cover malformed uploads, persistence, replay/conflict and mixed batch. Live TXT reached ready. Parser checks below. Broader parser corpus and concurrent upload stress pending. |
-| Durable jobs, leases, fencing, retries, recovery, cleanup | Implemented; partially verified | Nine processing integration tests pass. Complete process-kill/Redis-loss fault matrix pending. |
+| Durable jobs, leases, fencing, retries, recovery, cleanup | Implemented; partially verified | Eleven processing integration tests pass. Complete process-kill/Redis-loss fault matrix pending. |
 | Hybrid retrieval and cited multi-turn sessions | Implemented; partially verified | API tests verify history, source snapshots, sessions and deletion checks. Live cited answer persisted. Frozen retrieval/grounding evaluation pending. |
 | LangGraph and OpenRouter generation/embeddings | Implemented; live smoke verified | Configurable provider boundary; explicit graph stages, strict output schema, real response deltas. SQL owns persistence; no LangGraph checkpointer/resume claim. |
 | Retry, regeneration, cancellation, one active generation | Implemented; API tests verified | Latest-turn regeneration retains source snapshot and bypasses answer cache; older-turn retry rejected. Admission and cancellation races covered. UI flow pending manual validation. |
@@ -32,7 +32,7 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 | B09 | Smart caching | Implemented with scoped answer/query/embedding/parser reuse. Deterministic cache and retry checks pass. Measured live reuse report pending. |
 | B10 | Vector database | Implemented with pgvector `cosine_distance`, PostgreSQL full-text search and application `calculate_rrf` fusion. Exact retrieval; native HNSW/IVFFlat indexing is benchmark-gated. Four fusion unit cases and cited-chat/retry API checks pass. 10k-chunk benchmark pending. |
 | B11 | Streaming chat | Implemented. Live run produced 39 response text deltas, then canonical persisted completion. Browser stream/reconnect validation pending. |
-| B12 | Comprehensive testing | Partial: 47 backend tests passed previously; 32 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
+| B12 | Comprehensive testing | Partial: 53 backend tests pass; 32 frontend tests pass. Full fault matrix, held-out evaluation and browser tests remain. |
 | B13 | Cost tracking/optimization | Partial. Durable actual provider usage/cost ledger, unknown-cost counts, caches and embedding microbatches exist. Versioned estimate rates and measured savings report pending. |
 | B14 | Rate limiting/quotas | Partial. Atomic Redis rate admission exists. Daily cost reservation/enforcement is not implemented; `DAILY_BUDGET_USD` currently has no enforcement. Budget/resource concurrency gates pending. |
 | B15 | Versions | Backend implemented; snapshots and retry scope verified. UI version details/upload exist. Explicit historical-version selection in the chat picker and full current-pointer stress gate pending. |
@@ -45,7 +45,7 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 | Check | Command or retained evidence | Actual outcome |
 |---|---|---|
 | Backend lint | `.venv/bin/ruff check src tests migrations` | Exit 0: `All checks passed!` |
-| Full backend tests | `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests -q` | Exit 0: **47 passed in 9.85s**; no skipped tests. Tests create isolated schemas; application data is preserved. PostgreSQL is real; providers and selected transport boundaries are deterministic fakes. |
+| Full backend tests | `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests -q` | Exit 0: **53 passed in 12.32s**; no skipped tests. Tests create isolated schemas; application data is preserved. PostgreSQL is real; providers and selected transport boundaries are deterministic fakes. |
 | Frontend transport/runtime tests | In `web/`: `bun test src/lib` | Exit 0: **32 passed, 0 failed, 78 assertions**. Covers split SSE frames, interrupted generation, actionable errors, complete pagination, persisted-status/provenance conversion, single composer dispatch, blocked sends retaining drafts, latest-turn retry routing, backend-confirmed cancellation semantics, and thinking-indicator visibility for waiting/streaming/terminal/optimistic messages using the published runtime and server-rendered primitives. Seven added runtime/server-render checks cover numbered citations, GFM/code controls, safe links/raw-HTML exclusion, unresolved citation IDs, the static document renderer, hidden-at-bottom scroll state, and tooltip icon names. These are not browser tests. |
 | Frontend typecheck/build | In `web/`: `bun run typecheck`; `bun run build` | Exit 0 after assistant-ui integration. Production bundle generated; lazy chat chunk 350.06 kB (104.32 kB gzip). This is a build-size observation, not a browser performance benchmark. |
 | 21st design review | `21st review web/src/App.tsx web/src/pages/chat.tsx web/src/index.css --json` | Local deterministic review executed; no errors. Composer uses a responsive maximum width, not a fixed minimum width. Dialog autofocus removed. Token-definition color suggestions are intentional. Final review: five files, zero errors/warnings; 12 informational color suggestions. |
@@ -55,6 +55,13 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 | Browser validation | User response on 2 October 2026 | **Manual validation selected. Agent did not drive the browser.** Desktop/mobile appearance and interactive flow remain unverified. |
 
 21st catalog search returned HTTP 401. Public [sidebar guidance](https://docs.21st.dev/blog/react-sidebar-component-examples) informed nested navigation; project shadcn/Radix primitives were reused. No catalog component is claimed installed. Durable design choices live in [`.21st/design.json`](../.21st/design.json).
+
+## Worker nullable-value fix: 3 October 2026
+
+- Reproduced **16 Pyright 1.1.414 errors** in `src/docvault/processing.py`, including optional artifact/document attributes and the conditional `Version | None` ingest value.
+- Reused `require_document`, added the typed `_require_artifact` guard raising existing `SourceDeleted`, and explicitly narrowed the ingest version. No type-ignore, cast or disabled diagnostic was introduced. Missing artifacts stop before provider work; ordinary summaries and ingestion still persist.
+- File-scoped command: `npm exec --cache /private/tmp/docvault-pyright-npm --offline --yes --package pyright -- pyright --pythonpath .venv/bin/python --outputjson src/docvault/processing.py`. After fix: exit 0, **0 errors / 0 warnings**. Pyright was run from a temporary npm cache; no project dependency added. No whole-repository typecheck claim.
+- Added two real-database integration tests for missing-artifact rejection and summary persistence. Full backend suite against isolated `docvault_test` schemas: exit 0, **53 passed in 12.32s**. Ruff on changed Python files and diff checks pass. Providers are deterministic fakes; no live model call required.
 
 ## Retrieval review: 3 October 2026
 

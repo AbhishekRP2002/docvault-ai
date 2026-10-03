@@ -4,6 +4,7 @@ Each test owns a random PostgreSQL schema and temporary storage directory. No
 application data is reset. Model calls are deterministic; PostgreSQL is real.
 """
 
+import asyncio
 import hashlib
 import os
 import time
@@ -17,7 +18,7 @@ from docvault import cache, config, jobs, processing
 from docvault import db as database
 from docvault.ai.insights import DocumentInsights, KeyInsight
 from docvault.ai.provider import ProviderError
-from docvault.models import Chat, Chunk, Document, Job, JobAttempt, Message, Version, now
+from docvault.models import Artifact, Chat, Chunk, Document, Job, JobAttempt, Message, Version, now
 
 pytestmark = [
     pytest.mark.integration,
@@ -149,6 +150,39 @@ def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated
     with database.session() as db, db.begin():
         db.get(Job, insight_job_id).status = "queued"
     jobs.run_job(insight_job_id)
+    assert ai.generations == 1
+
+
+def test_missing_artifact_is_rejected_before_provider_work(isolated_db, monkeypatch):
+    def unexpected_provider(resource):
+        pytest.fail("A missing artifact must not start provider work.")
+
+    monkeypatch.setattr(processing, "create_ai", unexpected_provider)
+    with pytest.raises(jobs.SourceDeleted, match="artifact no longer exists"):
+        asyncio.run(processing._artifact(str(uuid4()), 1, str(uuid4())))
+
+
+def test_summary_artifact_persists_after_guarded_lookups(isolated_db, monkeypatch):
+    ai = FakeAI()
+    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
+    _, version_id, ingest_job_id = seed_version()
+    jobs.run_job(ingest_job_id)
+    with database.session() as db, db.begin():
+        artifact = Artifact(kind="summary", signature=uuid4().hex, version_ids=[version_id])
+        db.add(artifact)
+        db.flush()
+        job = Job(kind="summary", resource_id=artifact.id)
+        db.add(job)
+        db.flush()
+        artifact_id, job_id = artifact.id, job.id
+    jobs.run_job(job_id)
+    with database.session() as db:
+        artifact = db.get(Artifact, artifact_id)
+        assert artifact is not None and artifact.status == "ready"
+        assert artifact.data is not None
+        assert artifact.data["summary"] == "Payment is due in 30 days."
+        job = db.get(Job, job_id)
+        assert job is not None and job.status == "complete"
     assert ai.generations == 1
 
 
