@@ -1,6 +1,6 @@
 # DocVault AI specification
 
-Status: approved direction; implementation in progress. Updated: 3 October 2026. Verification status is tracked in [implementation-plan.md](implementation-plan.md).
+Status: approved direction; implementation in progress. Updated: 4 October 2026. Verification status is tracked in [implementation-plan.md](implementation-plan.md).
 
 Source: the four-page supplied assignment, `ai powered document vault system.pdf`, followed by the user's design decisions in this conversation. This document defines the target contract; a feature is not verified merely because it appears here. Backend and frontend work are underway, with live integration and acceptance evidence recorded separately.
 
@@ -136,6 +136,7 @@ stateDiagram-v2
 
 - A PostgreSQL `jobs` row is both the durable work request and recovery record. The dispatcher selects eligible rows using short leases, publishes their IDs to RQ, and records publication. A crash between enqueue and acknowledgement can duplicate delivery.
 - Workers claim execution through a database compare-and-set lease and increment a fencing token. Every stage checkpoint and final state change checks that token. Stale workers cannot publish results after recovery or deletion.
+- Heartbeat renewal and stale-response recovery use PostgreSQL `UPDATE ... RETURNING` through SQLAlchemy scalar results. A heartbeat stops when no matching claim is returned; recovery notifies clients only when work changed. The recovery update still affects every matching stale response; the first returned ID is used only to detect that any row changed.
 - Use deterministic artifact signatures: source hash + parser/OCR version/options; then chunker/tokenizer version/options; then embedding model/dimensions and exact contextualized input hash. Persist successful stage outputs and embed only missing inputs.
 - Write chunks under an index-generation ID. Activate the complete generation in one transaction; retrieval cannot see a half-built index. Do not mix incompatible embedding models/dimensions.
 - Treat delivery as **at least once**. Unique constraints, compare-and-set transitions, and upserts make database effects idempotent. A provider call that succeeded before a crash may be billed again on retry; do not promise exactly-once external calls.

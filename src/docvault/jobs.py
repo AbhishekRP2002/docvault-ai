@@ -147,7 +147,7 @@ def _heartbeat(job_id: str, token: int, stop: threading.Event) -> None:
     while not stop.wait(interval):
         try:
             with session() as db, db.begin():
-                result = db.execute(
+                updated_job_id = db.scalar(
                     update(Job)
                     .where(
                         Job.id == job_id,
@@ -155,8 +155,9 @@ def _heartbeat(job_id: str, token: int, stop: threading.Event) -> None:
                         Job.status == "running",
                     )
                     .values(lease_until=now() + timedelta(seconds=get_settings().lease_seconds))
+                    .returning(Job.id)
                 )
-                if result.rowcount != 1:
+                if updated_job_id is None:
                     return
         except OperationalError:
             log.warning("Job heartbeat unavailable for job %s", job_id)
@@ -225,7 +226,7 @@ def dispatch_once() -> int:
     """Recover expired claims, commit dispatch leases, then publish queue deliveries."""
     timestamp = now()
     with session() as db, db.begin():
-        recovered_messages = db.execute(
+        recovered_message_id = db.scalar(
             update(Message)
             .where(
                 Message.role == "assistant",
@@ -241,7 +242,8 @@ def dispatch_once() -> int:
                 updated_at=timestamp,
                 error="The previous generation stopped responding. You can retry this response.",
             )
-        ).rowcount
+            .returning(Message.id)
+        )
         abandoned = list(
             db.scalars(
                 select(Job)
@@ -305,7 +307,7 @@ def dispatch_once() -> int:
                     )
                     .values(status="queued", lease_until=None, next_at=now() + timedelta(seconds=5))
                 )
-    if deliveries or abandoned or recovered_messages:
+    if deliveries or abandoned or recovered_message_id is not None:
         notify_change()
     return count
 

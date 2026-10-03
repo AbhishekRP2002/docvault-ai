@@ -1,6 +1,6 @@
 # Implementation and verification ledger
 
-Updated: 3 October 2026. This ledger records the current repository, not just the planned architecture. The [specification](spec.md) defines acceptance; the [implementation plan](implementation-plan.md) defines remaining work.
+Updated: 4 October 2026. This ledger records the current repository, not just the planned architecture. The [specification](spec.md) defines acceptance; the [implementation plan](implementation-plan.md) defines remaining work.
 
 **Implemented** means code exists. **Verified** describes a specific executed check. **Partial** means some scope or acceptance evidence is missing. A bonus is not complete merely because its endpoint exists.
 
@@ -55,6 +55,13 @@ Updated: 3 October 2026. This ledger records the current repository, not just th
 | Browser validation | User response on 2 October 2026 | **Manual validation selected. Agent did not drive the browser.** Desktop/mobile appearance and interactive flow remain unverified. |
 
 21st catalog search returned HTTP 401. Public [sidebar guidance](https://docs.21st.dev/blog/react-sidebar-component-examples) informed nested navigation; project shadcn/Radix primitives were reused. No catalog component is claimed installed. Durable design choices live in [`.21st/design.json`](../.21st/design.json).
+
+## Worker result typing fix: 4 October 2026
+
+- Reproduced **two Pyright errors** at `jobs.py` heartbeat/recovery `rowcount` accesses. Installed SQLAlchemy is **2.1.2**: the general ORM `Result` type does not expose `CursorResult.rowcount`.
+- Replaced both accesses with `UPDATE ... RETURNING` and `Session.scalar()`. Missing heartbeat IDs stop the old runner; any returned stale-response ID triggers the existing notification. The recovery SQL still updates all matching messages. No casts, ignores, dependency changes or migration were introduced.
+- Baseline focused integration check: **2 passed, 9 deselected**. Added a lost-claim heartbeat test and strengthened stale-generation recovery to verify notification/no-change behavior. After fix, `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/python -m pytest tests/integration/test_processing.py -q -k 'heartbeat or dispatcher_recovers_stale_generation' --tb=short` exited 0: **3 passed, 9 deselected in 4.46s**, using isolated schemas.
+- `npm exec --cache /private/tmp/docvault-pyright-npm --offline --yes --package pyright -- pyright --pythonpath .venv/bin/python src/docvault/jobs.py src/docvault/processing.py` exited 0: **0 errors, 0 warnings, 0 informations**. Ruff on changed Python files and diff checks pass. Last full-suite result remains the 3 October **53-test** run; this change used focused regression checks.
 
 ## Worker nullable-value fix: 3 October 2026
 

@@ -7,6 +7,7 @@ application data is reset. Model calls are deterministic; PostgreSQL is real.
 import asyncio
 import hashlib
 import os
+import threading
 import time
 from datetime import timedelta
 from uuid import uuid4
@@ -304,6 +305,33 @@ def test_heartbeat_keeps_a_slow_runner_claimed(isolated_db, monkeypatch):
         assert db.get(Version, version_id).status == "ready"
 
 
+def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
+    _, _, job_id = seed_version()
+    token = jobs._claim(job_id)
+    assert token is not None
+    with database.session() as db, db.begin():
+        job = db.get(Job, job_id)
+        assert job is not None
+        job.token += 1
+        lease = job.lease_until
+
+    class ControlledStop(threading.Event):
+        def __init__(self):
+            super().__init__()
+            self.waits = 0
+
+        def wait(self, timeout: float | None = None) -> bool:
+            self.waits += 1
+            return self.waits > 1
+
+    stop = ControlledStop()
+    jobs._heartbeat(job_id, token, stop)
+    assert stop.waits == 1
+    with database.session() as db:
+        job = db.get(Job, job_id)
+        assert job is not None and job.lease_until == lease
+
+
 def test_only_transient_failures_retry_and_stop_after_three_attempts(isolated_db, monkeypatch):
     ai = FakeAI()
 
@@ -347,7 +375,11 @@ def test_real_rq_delivery_executes_claimed_job(isolated_db, monkeypatch):
         queue.delete(delete_jobs=True)
 
 
-def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(isolated_db):
+def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(
+    isolated_db, monkeypatch
+):
+    notifications = []
+    monkeypatch.setattr(jobs, "notify_change", lambda: notifications.append(True))
     with database.session() as db, db.begin():
         old_chat, live_chat = Chat(title="Old", version_ids=[]), Chat(title="Live", version_ids=[])
         db.add_all([old_chat, live_chat])
@@ -363,9 +395,13 @@ def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(i
         db.flush()
         old_id, live_id, old_chat_id = old_message.id, live_message.id, old_chat.id
     assert jobs.dispatch_once() == 0
+    assert notifications == [True]
     with database.session() as db, db.begin():
         assert db.get(Message, old_id).status == "failed"
         assert "retry" in db.get(Message, old_id).error
         assert db.get(Message, live_id).status == "streaming"
         # The stale generation no longer occupies the partial unique constraint.
         db.add(Message(chat_id=old_chat_id, role="assistant", status="pending"))
+    # With nothing stale or queued, an empty RETURNING result causes no update event.
+    assert jobs.dispatch_once() == 0
+    assert notifications == [True]
