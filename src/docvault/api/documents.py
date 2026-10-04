@@ -16,6 +16,7 @@ from docvault.documents import (
     require_version,
     require_versions,
     serialize_document_response,
+    serialize_document_responses,
 )
 from docvault.errors import AppError
 from docvault.limits import enforce_request_rate_limit
@@ -50,10 +51,9 @@ def list_documents(
                 Version.status == status
             )
         return {
-            "items": [
-                serialize_document_response(db, document)
-                for document in db.scalars(query.limit(limit).offset(offset))
-            ]
+            "items": serialize_document_responses(
+                db, list(db.scalars(query.limit(limit).offset(offset)))
+            )
         }
 
 
@@ -147,14 +147,20 @@ def require_upload_batch(db: Session, batch_id: str) -> Batch:
 
 def serialize_upload_batch_response(db: Session, batch: Batch) -> dict:
     """Serialize an existing upload batch with live document metadata."""
+    document_ids = [item["document_id"] for item in batch.items if item["document_id"]]
+    documents = list(
+        db.scalars(
+            select(Document).where(Document.id.in_(document_ids), Document.deleted_at.is_(None))
+        )
+    )
+    payloads = {doc["id"]: doc for doc in serialize_document_responses(db, documents)}
     items = []
     for item in batch.items:
-        doc = db.get(Document, item["document_id"]) if item["document_id"] else None
         items.append(
             dict(
                 filename=item["filename"],
                 error=item["error"],
-                document=serialize_document_response(db, doc) if doc and not doc.deleted_at else None,
+                document=payloads.get(item["document_id"]),
             )
         )
     return {"id": batch.id, "items": items}

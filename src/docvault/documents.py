@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 from fastapi.encoders import jsonable_encoder
@@ -7,7 +8,7 @@ from sqlalchemy.orm import Session
 from docvault.cache import calculate_json_fingerprint, notify_change
 from docvault.db import session
 from docvault.errors import AppError
-from docvault.models import Document, Idempotency, Job, Version, now
+from docvault.models import Document, Idempotency, Job, JobAttempt, Version, now
 from docvault.storage import resolve_storage_path
 
 
@@ -52,10 +53,85 @@ def require_versions(db: Session, version_ids: list[str], *, ready: bool = True)
     ]
 
 
-def serialize_document_response(db: Session, doc: Document, version: Version | None = None) -> dict:
-    """Build a library payload from a document and its supplied or latest version."""
-    if version is None and doc.latest_version_id is not None:
-        version = db.get(Version, doc.latest_version_id)
+def serialize_processing(job: Job, attempt: JobAttempt | None, timestamp: datetime) -> dict:
+    """Describe the latest ingestion attempt, excluding queue and retry backoff time."""
+    started_at = finished_at = None
+    if job.attempts:
+        # Manual retries reset attempts but retain the previous cycle's attempt rows.
+        # A missing current attempt may fall back to the job's own recorded timestamps.
+        if attempt and (
+            attempt.attempt != job.attempts
+            or (job.started_at and attempt.started_at < job.started_at)
+        ):
+            attempt = None
+        started_at = attempt.started_at if attempt else job.started_at
+        finished_at = attempt.finished_at if attempt else job.finished_at
+    end = timestamp if job.status == "running" else finished_at
+    duration_ms = (
+        max(0, (end - started_at).total_seconds() * 1000)
+        if started_at is not None and end is not None
+        else None
+    )
+    return dict(
+        run_id=job.id,
+        status=job.status,
+        attempts=job.attempts,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+    )
+
+
+def load_processing_metadata(db: Session, version_ids: list[str]) -> dict[str, dict]:
+    """Read the newest ingestion job and attempt per version in at most two queries."""
+    if not version_ids:
+        return {}
+    ranked_jobs = (
+        select(
+            Job.id,
+            func.row_number()
+            .over(partition_by=Job.resource_id, order_by=(Job.created_at.desc(), Job.id.desc()))
+            .label("rank"),
+        )
+        .where(Job.resource_id.in_(version_ids), Job.kind == "ingest")
+        .subquery()
+    )
+    jobs = list(
+        db.scalars(
+            select(Job).join(ranked_jobs, Job.id == ranked_jobs.c.id).where(ranked_jobs.c.rank == 1)
+        )
+    )
+    if not jobs:
+        return {}
+    ranked_attempts = (
+        select(
+            JobAttempt.id,
+            func.row_number()
+            .over(
+                partition_by=JobAttempt.job_id,
+                order_by=(JobAttempt.started_at.desc(), JobAttempt.id.desc()),
+            )
+            .label("rank"),
+        )
+        .where(JobAttempt.job_id.in_([job.id for job in jobs]))
+        .subquery()
+    )
+    attempts = {
+        attempt.job_id: attempt
+        for attempt in db.scalars(
+            select(JobAttempt)
+            .join(ranked_attempts, JobAttempt.id == ranked_attempts.c.id)
+            .where(ranked_attempts.c.rank == 1)
+        )
+    }
+    timestamp = now()
+    return {
+        job.resource_id: serialize_processing(job, attempts.get(job.id), timestamp) for job in jobs
+    }
+
+
+def _serialize_document(doc: Document, version: Version | None, processing: dict | None) -> dict:
+    """Build the shared document payload from already loaded metadata."""
     if version is None:
         raise AppError(
             409, "document_not_ready", "This document has no available uploaded version yet."
@@ -75,12 +151,44 @@ def serialize_document_response(db: Session, doc: Document, version: Version | N
         version_number=version.version_number,
         page_count=version.page_count,
         chunk_count=version.chunk_count,
+        token_count=version.token_count,
+        parser=version.parser,
+        embedding_model=version.embedding_model,
+        processing=processing,
         insight_status=version.insight_status,
         summary=insights.get("summary"),
         category=insights.get("category"),
         tags=insights.get("tags", []),
         error=version.error,
     )
+
+
+def serialize_document_response(db: Session, doc: Document, version: Version | None = None) -> dict:
+    """Build a library payload from a document and its supplied or latest version."""
+    if version is None and doc.latest_version_id is not None:
+        version = db.get(Version, doc.latest_version_id)
+    processing = load_processing_metadata(db, [version.id]) if version else {}
+    return _serialize_document(doc, version, processing.get(version.id) if version else None)
+
+
+def serialize_document_responses(db: Session, documents: list[Document]) -> list[dict]:
+    """Serialize a page's latest versions and processing metadata without per-row queries."""
+    if not documents:
+        return []
+    version_ids = [doc.latest_version_id for doc in documents if doc.latest_version_id]
+    versions = {
+        version.id: version
+        for version in db.scalars(select(Version).where(Version.id.in_(version_ids)))
+    }
+    processing = load_processing_metadata(db, list(versions))
+    return [
+        _serialize_document(
+            doc,
+            versions.get(doc.latest_version_id) if doc.latest_version_id else None,
+            processing.get(doc.latest_version_id) if doc.latest_version_id else None,
+        )
+        for doc in documents
+    ]
 
 
 def accept_document_upload(info: dict, key: str | None, document_id: str | None = None) -> dict:
@@ -132,9 +240,7 @@ def accept_document_upload(info: dict, key: str | None, document_id: str | None 
                         )
                     return serialize_document_response(db, doc)
                 last_version_number = db.scalar(
-                    select(func.max(Version.version_number)).where(
-                        Version.document_id == doc.id
-                    )
+                    select(func.max(Version.version_number)).where(Version.document_id == doc.id)
                 )
                 number = last_version_number + 1 if last_version_number is not None else 1
             else:

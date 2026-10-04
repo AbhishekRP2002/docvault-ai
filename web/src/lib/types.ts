@@ -5,6 +5,14 @@ export type DocumentStatus =
   | "embedding"
   | "ready"
   | "failed";
+export interface DocumentProcessing {
+  run_id: string;
+  status: string;
+  attempts: number;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+}
 export interface VaultDocument {
   id: string;
   title: string;
@@ -19,6 +27,10 @@ export interface VaultDocument {
   version_number: number;
   page_count: number | null;
   chunk_count: number;
+  token_count?: number;
+  parser?: string | null;
+  embedding_model?: string | null;
+  processing?: DocumentProcessing | null;
   insight_status: string;
   summary: string | null;
   category: string | null;
