@@ -5,6 +5,7 @@ import hashlib
 import math
 import os
 import random
+import shutil
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -189,6 +190,39 @@ def test_migration_preserves_ledger_and_existing_chunks(isolated_database):
     command.upgrade(isolated_database.alembic, "head")
     with isolated_database.engine.connect() as connection:
         assert connection.scalar(select(LLMCall.id)) == identifier
+
+
+def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_path):
+    """Generate and execute a fresh revision without hand-editing its ledger/index operations."""
+    command.upgrade(isolated_database.alembic, PREVIOUS_REVISION)
+    with isolated_database.engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO ai_calls (id, model, operation, input_tokens, duration_ms, status, created_at)
+            VALUES ('generated-call', 'fixture-model', 'embedding', 12, 1, 'complete', now())
+        """))
+    generated_directory = tmp_path / "migrations"
+    shutil.copytree("migrations", generated_directory, ignore=shutil.ignore_patterns("__pycache__"))
+    for candidate in (generated_directory / "versions").glob("d18c6a20b5e9_*.py"):
+        candidate.unlink()
+    generated_config = Config("alembic.ini")
+    generated_config.set_main_option("script_location", str(generated_directory))
+    command.revision(
+        generated_config, message="generation regression", autogenerate=True, rev_id="generatedcheck"
+    )
+    generated_source = next(
+        (generated_directory / "versions").glob("generatedcheck_*.py")
+    ).read_text()
+    assert 'op.rename_table("ai_calls", "llm_calls")' in generated_source
+    assert 'op.rename_table("llm_calls", "ai_calls")' in generated_source
+    assert "op.create_table(" not in generated_source and "op.drop_table(" not in generated_source
+    assert 'postgresql_with={"m": 32, "ef_construction": 200}' in generated_source
+    command.upgrade(generated_config, "head")
+    with isolated_database.engine.connect() as connection:
+        assert connection.scalar(select(LLMCall.input_tokens)) == 12
+        assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+    command.downgrade(generated_config, PREVIOUS_REVISION)
+    with isolated_database.engine.connect() as connection:
+        assert connection.scalar(text("SELECT input_tokens FROM ai_calls")) == 12
 
 
 def seed_retrieval_corpus(engine):

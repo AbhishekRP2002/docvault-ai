@@ -14,7 +14,7 @@ The feature-by-feature implementation ledger is [progress.md](progress.md). It i
 |---|---|---|
 | Specification and research | Implemented | Approved LangGraph/RQ/OpenRouter decisions and all 18 bonuses retained. UI contract updated to the user's two-column reference. |
 | M0 provider/parser feasibility | Partially verified | Earlier real embedding/structured-stream smoke; final native Docling checks confirm DOCX, four-page PDF (25 chunks) and image-only OCR content in chunks. Full corpus/resource benchmarks pending. |
-| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; 72 backend tests pass with database integration enabled, including real HNSW/migration checks; scoped jobs/processing/parsing/retrieval Pyright passes. All 172 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
+| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; Previous full suite: 72 backend tests passed, including real HNSW checks. Latest relevant regression suite: 63 passed, including generated migration and nullable upload checks; scoped document/generation-hook Pyright passes. All 177 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
 | M4 insights/customization | Implemented; partially verified | Structured analysis and summary artifact code plus deterministic tests. Live coverage/long-document review pending. |
 | M5 comparison/cache/quotas | Partially implemented | Comparison, scoped caches and reuse implemented. Daily budget reservations and full quota gates pending; DAILY_BUDGET_USD currently has no enforcement. |
 | M6 frontend | Implemented; browser validation pending | Two-column SaaS shell, Files, Usage, Agent/New Run/Past Runs. assistant-ui External Store Runtime integrates the Python SSE/history with thread/composer primitives, scroll-to-bottom, Radix icon tooltips and streaming MarkdownText. Typecheck/build and 32 transport/runtime/rendering tests pass. User chose manual browser validation. |
@@ -26,6 +26,10 @@ Owned backend code uses `docvault.llm`, `OpenRouterLLM`, `LLMCall` and descripti
 Record actual commands and evidence in [progress.md](progress.md). Passing deterministic provider tests verifies application behavior, not model quality. No entire milestone or bonus is complete solely because its code exists.
 
 Maintain concise, behavior-specific docstrings for every function and method under `src/docvault`, including nested callbacks. Describe inputs/outputs, side effects, or failure handling where they help explain the contract. For documentation-only edits, audit coverage and compare executable ASTs against the pre-edit source; run backend lint and relevant existing checks without changing behavior.
+
+Generate schema revisions using `alembic revision --autogenerate`, never by manually creating migration files. The generation hook converts the known, unchanged ledger table pair into a data-preserving rename, refuses concurrent ledger structural changes and emits the HNSW compatibility guard. Ruff post-write hooks clean and format the generated revision. Review generated operations and test upgrade/downgrade against isolated schemas before application upgrade; preserve applied migration history. See [Alembic's operation-generation API](https://alembic.sqlalchemy.org/en/latest/api/autogenerate.html).
+
+Upload replay must reuse the validated `Document` returned by `require_document`. Version numbering must treat SQL `MAX` returning `NULL` as an empty history and start at version 1; tests verify persisted versions, jobs, pointers and replay without duplicate records.
 
 ### Responsibility map
 

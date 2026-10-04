@@ -25,7 +25,7 @@ from docvault.config import get_settings
 from docvault.db import Base, get_engine, session
 from docvault.integrations import create_llm_client
 from docvault.llm.types import Answer
-from docvault.models import Chat, Chunk, Document, Job, LLMCall, Message, Version, now
+from docvault.models import Chat, Chunk, Document, Idempotency, Job, LLMCall, Message, Version, now
 
 pytestmark = pytest.mark.integration
 
@@ -272,6 +272,75 @@ def test_upload_replay_remains_the_original_acceptance_after_a_new_version(api):
         assert db.scalar(select(func.count()).select_from(Version)) == 2
         assert db.scalar(select(func.count()).select_from(Job)) == 2
     assert len([p for p in (api.storage / "sources").iterdir() if p.is_file()]) == 2
+
+
+def test_legacy_upload_replay_without_saved_result_uses_existing_document(api):
+    """Replay a legacy key from persisted metadata without creating another version or job."""
+    headers = {"Idempotency-Key": "legacy-upload"}
+    payload = b"Original legacy terms."
+    first = api.client.post(
+        "/v1/documents", files={"file": ("legacy.txt", payload)}, headers=headers
+    )
+    assert first.status_code == 202, first.text
+    original = first.json()
+    with session() as db, db.begin():
+        record = db.get(Idempotency, "upload:new:legacy-upload")
+        record.result = None
+        document = db.get(Document, original["id"])
+        document.title = "Updated legacy title"
+    with session() as db:
+        assert db.get(Idempotency, "upload:new:legacy-upload").result is None
+    expected = api.client.get(f"/v1/documents/{original['id']}")
+    assert expected.status_code == 200, expected.text
+
+    replay = api.client.post(
+        "/v1/documents", files={"file": ("legacy.txt", payload)}, headers=headers
+    )
+    assert replay.status_code == 202, replay.text
+    assert replay.json() == expected.json()
+    assert replay.json()["latest_version_id"] == original["latest_version_id"]
+    with session() as db:
+        assert db.scalar(select(func.count()).select_from(Document)) == 1
+        assert db.scalar(select(func.count()).select_from(Version)) == 1
+        assert db.scalar(select(func.count()).select_from(Job)) == 1
+        version = db.get(Version, original["latest_version_id"])
+        assert (api.storage / version.storage_key).read_bytes() == payload
+    assert len([p for p in (api.storage / "sources").iterdir() if p.is_file()]) == 1
+
+
+def test_upload_first_version_to_existing_document_without_versions(api):
+    """Start an existing empty document at version one and persist its ingestion intent."""
+    with session() as db, db.begin():
+        document = Document(title="Empty document")
+        db.add(document)
+        db.flush()
+        document_id = document.id
+    payload = b"First version of the existing document."
+    response = api.client.post(
+        f"/v1/documents/{document_id}/versions",
+        files={"file": ("first.txt", payload)},
+        headers={"Idempotency-Key": "first-version"},
+    )
+    assert response.status_code == 202, response.text
+    result = response.json()
+    assert result["id"] == document_id
+    assert result["title"] == "Empty document"
+    assert result["version_number"] == 1
+    with session() as db:
+        assert db.scalar(select(func.count()).select_from(Document)) == 1
+        assert db.scalar(select(func.count()).select_from(Version)) == 1
+        assert db.scalar(select(func.count()).select_from(Job)) == 1
+        document = db.get(Document, document_id)
+        version = db.get(Version, result["latest_version_id"])
+        assert document.latest_version_id == version.id
+        assert document.current_version_id is None
+        assert version.document_id == document_id and version.version_number == 1
+        assert version.status == "queued"
+        assert (api.storage / version.storage_key).read_bytes() == payload
+        job = db.scalar(select(Job))
+        assert job.resource_id == version.id and job.kind == "ingest" and job.status == "queued"
+        record = db.get(Idempotency, f"upload:{document_id}:first-version")
+        assert record.result == result
 
 
 def test_batch_accepts_valid_file_without_hiding_rejected_file(api):

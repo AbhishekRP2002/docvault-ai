@@ -95,10 +95,8 @@ def accept_document_upload(info: dict, key: str | None, document_id: str | None 
                         "idempotency_conflict",
                         "This request key was used for different content.",
                     )
-                require_document(db, record.resource_id)
-                return record.result or serialize_document_response(
-                    db, db.get(Document, record.resource_id)
-                )
+                doc = require_document(db, record.resource_id)
+                return record.result or serialize_document_response(db, doc)
             doc = require_document(db, document_id, lock=True) if document_id else None
             if not doc:
                 previous = db.scalar(
@@ -115,7 +113,7 @@ def accept_document_upload(info: dict, key: str | None, document_id: str | None 
                 if previous:
                     doc = require_document(db, previous.document_id, lock=True)
             if doc:
-                latest = db.get(Version, doc.latest_version_id)
+                latest = db.get(Version, doc.latest_version_id) if doc.latest_version_id else None
                 if latest and latest.sha256 == info["sha256"]:
                     if scoped_key:
                         db.add(
@@ -127,14 +125,12 @@ def accept_document_upload(info: dict, key: str | None, document_id: str | None 
                             )
                         )
                     return serialize_document_response(db, doc)
-                number = (
-                    db.scalar(
-                        select(func.max(Version.version_number)).where(
-                            Version.document_id == doc.id
-                        )
+                last_version_number = db.scalar(
+                    select(func.max(Version.version_number)).where(
+                        Version.document_id == doc.id
                     )
-                    + 1
                 )
+                number = last_version_number + 1 if last_version_number is not None else 1
             else:
                 doc = Document(title=Path(info["filename"]).stem)
                 db.add(doc)

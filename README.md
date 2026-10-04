@@ -37,6 +37,16 @@ After pulling the LLM naming/HNSW update, stop your API/worker/dispatcher, run `
 
 The local runtime was exercised on Python 3.13. The supplied Docker image targets Python 3.12; full `docker compose up --build` reproduction is still pending. Parser model assets download on first use; `uv run --extra parsing python scripts/warm_parser.py /path/to/small-scanned.pdf` can warm them first.
 
+## Generate migrations
+
+Create migration files with Alembic rather than authoring them manually:
+
+```sh
+uv run --extra parsing alembic revision --autogenerate -m "describe schema change"
+```
+
+Review the generated revision before applying it. Generation runs Ruff lint fixes and formatting automatically. Alembic cannot infer table renames; the project's generation hook preserves the known `ai_calls` → `llm_calls` ledger rename and rejects simultaneous ledger structural changes. It also emits the pgvector compatibility check when creating the HNSW index. Historical applied revisions stay unchanged. See [Alembic autogeneration hooks](https://alembic.sqlalchemy.org/en/latest/api/autogenerate.html).
+
 ## Checks
 
 ```sh
