@@ -10,9 +10,9 @@ from typing import Required, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from docvault.llm.prompts import CHAT_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT
-from docvault.llm.protocols import ChatGenerationLLM, DeltaCallback
-from docvault.llm.types import ChatGenerationLLMResponse, Evidence, QuestionRewriteLLMResponse
+from docvault.llm.prompts import CHAT_SYSTEM_PROMPT, INPUT_QUERY_REWRITE_SYSTEM_PROMPT
+from docvault.llm.provider import DeltaCallback, OpenRouterLLM
+from docvault.llm.types import ChatGenerationLLMResponse, Evidence, InputQueryRewriteLLMResponse
 
 
 class InvalidCitationError(ValueError):
@@ -46,7 +46,7 @@ async def run_document_chat_workflow(
     question: str,
     history: list[dict],
     retrieve_relevant_chunks: Callable[[str], Awaitable[list[Evidence]]],
-    llm: ChatGenerationLLM,
+    llm: OpenRouterLLM,
     on_delta: DeltaCallback,
 ) -> tuple[ChatGenerationLLMResponse, list[Evidence], str]:
     """Run question rewriting, retrieval, generation, and citation validation.
@@ -64,16 +64,16 @@ async def run_document_chat_workflow(
         if item.get("role") in {"user", "assistant"} and isinstance(item.get("content"), str)
     ]
 
-    async def rewrite_followup_question(state: ChatState) -> dict:
+    async def input_query_rewrite(state: ChatState) -> dict:
         """Resolve follow-up references with the model, or request clarification."""
         if not state["history"]:
             return {"query": state["question"], "clarification": ""}
         result = await llm.generate_structured_response(
-            QuestionRewriteLLMResponse,
+            InputQueryRewriteLLMResponse,
             [
                 {
                     "role": "system",
-                    "content": REWRITE_SYSTEM_PROMPT,
+                    "content": INPUT_QUERY_REWRITE_SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
@@ -85,7 +85,7 @@ async def run_document_chat_workflow(
                     ),
                 },
             ],
-            task="rewrite",
+            task="input_query_rewrite",
         )
         return {
             "query": result.standalone_question,
@@ -169,12 +169,12 @@ async def run_document_chat_workflow(
         }
 
     graph = StateGraph(ChatState)
-    graph.add_node("rewrite", rewrite_followup_question)
+    graph.add_node("input_query_rewrite", input_query_rewrite)
     graph.add_node("retrieve_relevant_chunks", retrieve_grounding_evidence)
     graph.add_node("generate", generate_grounded_answer)
     graph.add_node("validate", validate_generated_answer)
-    graph.add_edge(START, "rewrite")
-    graph.add_edge("rewrite", "retrieve_relevant_chunks")
+    graph.add_edge(START, "input_query_rewrite")
+    graph.add_edge("input_query_rewrite", "retrieve_relevant_chunks")
     graph.add_edge("retrieve_relevant_chunks", "generate")
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", END)

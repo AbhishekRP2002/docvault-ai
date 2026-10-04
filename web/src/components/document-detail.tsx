@@ -148,8 +148,10 @@ function Detail({
         <div className="mb-5 flex gap-2">
           <Button
             className="flex-1"
-            disabled={!isReady}
-            onClick={() => onChat([versionId])}
+            disabled={!doc.current_version_id}
+            onClick={() =>
+              doc.current_version_id && onChat([doc.current_version_id])
+            }
           >
             <Sparkles />
             Chat with document

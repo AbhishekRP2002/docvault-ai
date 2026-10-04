@@ -49,7 +49,7 @@ class OpenRouterLLM:
             raise ProviderError("Set OPENROUTER_API_KEY to enable LLM operations.")
         self.model_configurations = {
             task: settings.generation_model(task)
-            for task in ("chat", "rewrite", "summary", "comparison")
+            for task in ("chat", "input_query_rewrite", "summary", "comparison")
         }
         self.embedding_configuration = settings.embedding_model()
         self.client = AsyncOpenAI(

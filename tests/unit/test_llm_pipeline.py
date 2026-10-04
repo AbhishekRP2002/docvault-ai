@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from docvault.llm.config import GenerationModelConfig, LLMSettings, LLMTask
 from docvault.llm.graphs import (
     InvalidCitationError,
-    QuestionRewriteLLMResponse,
     run_document_chat_workflow,
 )
 from docvault.llm.insights import (
@@ -19,10 +18,11 @@ from docvault.llm.parsing import (
     parse_document_file,
     parse_text_document,
 )
-from docvault.llm.protocols import DeltaCallback, ResponseModel
 from docvault.llm.provider import (
+    DeltaCallback,
     OpenRouterLLM,
     ProviderError,
+    Schema,
     token_count,
 )
 from docvault.llm.types import (
@@ -30,6 +30,7 @@ from docvault.llm.types import (
     CitedKeyInsight,
     ComparisonDimensionLLMResponse,
     Evidence,
+    InputQueryRewriteLLMResponse,
     InsightsGenerationLLMResponse,
 )
 
@@ -170,11 +171,11 @@ def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeyp
         parse_document_file(tmp_path / "contract.pdf", "application/pdf", "contract.pdf")
 
 
-class ChatLLM:
+class ChatLLM(OpenRouterLLM):
     def __init__(
         self,
         answer: ChatGenerationLLMResponse | None = None,
-        rewrite: QuestionRewriteLLMResponse | None = None,
+        input_query_rewrite: InputQueryRewriteLLMResponse | None = None,
     ):
         """Configure deterministic chat and rewrite results without a provider connection."""
         self.answer = answer or ChatGenerationLLMResponse(
@@ -183,17 +184,17 @@ class ChatLLM:
             citation_ids=["c1"],
             outcome="answered",
         )
-        self.rewrite = rewrite
+        self.input_query_rewrite = input_query_rewrite
         self.generations = 0
 
     async def generate_structured_response(
-        self, schema: type[ResponseModel], messages: list[dict], *, task: LLMTask
-    ) -> ResponseModel:
+        self, schema: type[Schema], messages: list[dict], *, task: LLMTask
+    ) -> Schema:
         """Validate the configured rewrite against the workflow-requested schema."""
-        assert schema is QuestionRewriteLLMResponse
-        assert task == "rewrite"
-        assert self.rewrite is not None
-        return schema.model_validate(self.rewrite.model_dump())
+        assert schema is InputQueryRewriteLLMResponse
+        assert task == "input_query_rewrite"
+        assert self.input_query_rewrite is not None
+        return schema.model_validate(self.input_query_rewrite.model_dump())
 
     async def stream_structured_answer(
         self, messages: list[dict], on_delta: DeltaCallback
@@ -216,7 +217,7 @@ async def test_graph_rewrites_followups_then_retrieves_fresh_evidence():
         deltas.append(value)
 
     llm = ChatLLM(
-        rewrite=QuestionRewriteLLMResponse(
+        input_query_rewrite=InputQueryRewriteLLMResponse(
             standalone_question="When is the contract payment due?",
             needs_clarification=False,
             clarification_question="",
@@ -264,7 +265,7 @@ async def test_graph_without_evidence_does_not_generate_or_fake_deltas():
 )
 async def test_graph_ambiguous_followup_skips_retrieval(clarification_question, expected_response):
     llm = ChatLLM(
-        rewrite=QuestionRewriteLLMResponse(
+        input_query_rewrite=InputQueryRewriteLLMResponse(
             standalone_question="Which contract?",
             needs_clarification=True,
             clarification_question=clarification_question,
@@ -353,7 +354,7 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(
         await llm.close()
 
 
-class SummaryLLM:
+class SummaryLLM(OpenRouterLLM):
     def generation_model(self, task: LLMTask) -> GenerationModelConfig:
         """Use a small validated context to exercise recursive map and reduction."""
         return GenerationModelConfig(
@@ -365,8 +366,8 @@ class SummaryLLM:
         self.calls = []
 
     async def generate_structured_response(
-        self, schema: type[ResponseModel], messages: list[dict], *, task: LLMTask
-    ) -> ResponseModel:
+        self, schema: type[Schema], messages: list[dict], *, task: LLMTask
+    ) -> Schema:
         """Validate deterministic findings against the requested analysis response schema."""
         assert task == ("comparison" if schema is ComparisonDimensionLLMResponse else "summary")
         payload = json.loads(messages[-1]["content"])

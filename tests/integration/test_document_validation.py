@@ -84,3 +84,37 @@ def test_upload_batch_replay_rejects_a_missing_batch_and_cleans_staging_files(ap
         assert db.scalar(select(func.count()).select_from(Document)) == 1
         assert db.scalar(select(func.count()).select_from(Version)) == 1
         assert db.scalar(select(func.count()).select_from(Job)) == 1
+
+
+@pytest.mark.parametrize("upload_target", ["library", "new_version"])
+def test_identical_latest_upload_reuses_version_and_job_with_a_new_request_key(api, upload_target):
+    """Deduplicate source bytes independently of request keys and discard the new staging file."""
+    content = b"Payment is due in thirty days."
+    first = api.client.post(
+        "/v1/documents",
+        files={"file": ("terms.txt", content, "text/plain")},
+        headers={"Idempotency-Key": "original-upload"},
+    )
+    assert first.status_code == 202, first.text
+    document = first.json()
+    original_files = {path.name for path in (api.storage / "sources").iterdir()}
+    path = (
+        "/v1/documents"
+        if upload_target == "library"
+        else f"/v1/documents/{document['id']}/versions"
+    )
+    repeated = api.client.post(
+        path,
+        files={"file": ("terms.txt", content, "text/plain")},
+        headers={"Idempotency-Key": "different-upload-key"},
+    )
+    assert repeated.status_code == 202, repeated.text
+    assert repeated.json() == document
+    assert {path.name for path in (api.storage / "sources").iterdir()} == original_files
+    with session() as db:
+        persisted = require_persisted_row(db, Document, document["id"])
+        assert persisted.latest_version_id == document["latest_version_id"]
+        assert persisted.current_version_id is None
+        assert db.scalar(select(func.count()).select_from(Document)) == 1
+        assert db.scalar(select(func.count()).select_from(Version)) == 1
+        assert db.scalar(select(func.count()).select_from(Job)) == 1

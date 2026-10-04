@@ -37,6 +37,10 @@ After pulling the LLM naming/HNSW update, stop your API/worker/dispatcher, run `
 
 The local runtime was exercised on Python 3.13. The supplied Docker image targets Python 3.12; full `docker compose up --build` reproduction is still pending. Parser model assets download on first use; `uv run --extra parsing python scripts/warm_parser.py /path/to/small-scanned.pdf` can warm them first.
 
+To replace a document, open its details and use **Upload new version**. Identical bytes reuse the latest revision; changed bytes are parsed/chunked and reuse vectors for unchanged contextualized input hashes. After indexing completes, new questions automatically use that document's newest ready revision. Pending/failed revisions keep the previous ready source active. Completed/in-flight answers and retries retain their exact historical snapshots; comparisons may explicitly select historical versions. Ordinary uploads are new logical documents, so matching filenames alone do not imply replacement.
+
+Hybrid retrieval takes at most 15 semantic and 15 lexical candidates across the selected sources, then returns at most five chunks with cosine similarity strictly above 0.7. It can return fewer or none. The threshold is not a probability/confidence score; retrieval quality calibration remains pending.
+
 ## Configure LLM tasks
 
 Edit [`src/docvault/llm/prompts.py`](src/docvault/llm/prompts.py) for system prompts and summary word targets. [`src/docvault/llm/config.py`](src/docvault/llm/config.py) contains model defaults, context/output reservations, optional temperature and embedding batch capacities. All Pydantic response models are in `llm/types.py`.
@@ -44,10 +48,12 @@ Edit [`src/docvault/llm/prompts.py`](src/docvault/llm/prompts.py) for system pro
 | Task | Repository default | Environment override |
 |---|---|---|
 | Chat answer and suggestions | `openai/gpt-4.1-mini` | `OPENROUTER_CHAT_MODEL` |
-| Follow-up question rewriting | `openai/gpt-4.1-nano` | `OPENROUTER_REWRITE_MODEL` |
+| Follow-up question rewriting | `openai/gpt-4.1-nano` | `OPENROUTER_INPUT_QUERY_REWRITE_MODEL` |
 | Summary, category, tags and key insights | `openai/gpt-4.1-mini` | `OPENROUTER_SUMMARY_MODEL` |
 | Comparison dimension findings | `openai/gpt-4.1` | `OPENROUTER_COMPARISON_MODEL` |
 | Embeddings | `openai/text-embedding-3-small` | `OPENROUTER_EMBEDDING_MODEL` |
+
+Input-query rewriting uses `InputQueryRewriteModelSettings` and task `input_query_rewrite`; legacy `OPENROUTER_REWRITE_*` environment names remain supported. Use the new `OPENROUTER_INPUT_QUERY_REWRITE_*` names for new configuration.
 
 Use the separate capacity variables in `.env.example`. Existing `OPENROUTER_CONTEXT_TOKENS`/`OPENROUTER_MAX_OUTPUT_TOKENS` configure chat only; the other tasks use `OPENROUTER_<TASK>_CONTEXT_TOKENS`/`OPENROUTER_<TASK>_MAX_OUTPUT_TOKENS`. Optional `OPENROUTER_<TASK>_TEMPERATURE` is omitted by default. Restart the API/worker/dispatcher after configuration or prompt edits. Configured capacities must fit the selected model's actual limits. Changing embedding model/dimensions requires compatible document/query embeddings and index migration/reprocessing.
 

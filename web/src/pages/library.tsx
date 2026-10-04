@@ -84,7 +84,7 @@ export function Library({
           : d.status === filter)),
   );
   const selectedVersions = documents.flatMap((d) =>
-    selected.includes(d.id) && d.status === "ready" && d.current_version_id
+    selected.includes(d.id) && d.current_version_id
       ? [d.current_version_id]
       : [],
   );
@@ -220,7 +220,7 @@ export function Library({
           { label: "Total documents", value: documents.length, icon: Files },
           {
             label: "Ready to explore",
-            value: documents.filter((d) => d.status === "ready").length,
+            value: documents.filter((d) => !!d.current_version_id).length,
             icon: FileText,
           },
           {
@@ -418,17 +418,17 @@ export function Library({
                       <Checkbox
                         aria-label="Select all visible ready documents"
                         checked={
-                          filtered.filter((d) => d.status === "ready").length >
+                          filtered.filter((d) => !!d.current_version_id).length >
                             0 &&
                           filtered
-                            .filter((d) => d.status === "ready")
+                            .filter((d) => !!d.current_version_id)
                             .every((d) => selected.includes(d.id))
                         }
                         onCheckedChange={(checked) =>
                           setSelected(
                             checked
                               ? filtered
-                                  .filter((d) => d.status === "ready")
+                                  .filter((d) => !!d.current_version_id)
                                   .map((d) => d.id)
                               : [],
                           )
@@ -457,7 +457,7 @@ export function Library({
                       <td className="py-5 pl-5">
                         <Checkbox
                           aria-label={`Select ${doc.title}`}
-                          disabled={doc.status !== "ready"}
+                          disabled={!doc.current_version_id}
                           checked={selected.includes(doc.id)}
                           onCheckedChange={(checked) =>
                             setSelected((ids) =>
@@ -530,7 +530,7 @@ export function Library({
                     <FileText className="size-7 text-primary/75" />
                     <Checkbox
                       aria-label={`Select ${doc.title}`}
-                      disabled={doc.status !== "ready"}
+                      disabled={!doc.current_version_id}
                       checked={selected.includes(doc.id)}
                       onCheckedChange={(checked) =>
                         setSelected((ids) =>

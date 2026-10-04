@@ -133,7 +133,7 @@ def get_public_configuration():
         embedding_model=settings.openrouter_embedding_model,
         task_models={
             task: settings.generation_model(task).model
-            for task in ("chat", "rewrite", "summary", "comparison")
+            for task in ("chat", "input_query_rewrite", "summary", "comparison")
         },
     )
 

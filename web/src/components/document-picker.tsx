@@ -70,7 +70,7 @@ export function DocumentPicker({
                 draft.length
                   ? []
                   : documents.flatMap((d) =>
-                      d.status === "ready" && d.current_version_id
+                      d.current_version_id
                         ? [d.current_version_id]
                         : [],
                     ),
@@ -83,7 +83,7 @@ export function DocumentPicker({
         <div className="max-h-[45dvh] space-y-1 overflow-y-auto">
           {filtered.map((doc) => {
             const id = doc.current_version_id;
-            const ready = doc.status === "ready" && !!id;
+            const ready = !!id;
             const checked = !!id && draft.includes(id);
             return (
               <label
@@ -113,7 +113,9 @@ export function DocumentPicker({
                     {doc.title}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    Version {doc.version_number}
+                    {doc.status === "ready"
+                      ? `Version ${doc.version_number}`
+                      : "Current ready version"}
                   </span>
                 </span>
                 <StatusBadge status={doc.status} />

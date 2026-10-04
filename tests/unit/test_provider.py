@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from docvault.llm.config import LLMSettings
 from docvault.llm.provider import ContextLimitError, OpenRouterLLM, ProviderError
-from docvault.llm.types import ChatGenerationLLMResponse, QuestionRewriteLLMResponse
+from docvault.llm.types import ChatGenerationLLMResponse, InputQueryRewriteLLMResponse
 
 PROVIDER_USAGE = {
     "prompt_tokens": 42,
@@ -237,23 +237,23 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
     llm = create_provider(
         handler,
         record,
-        openrouter_rewrite_model="test/rewrite",
-        openrouter_rewrite_max_output_tokens=512,
-        openrouter_rewrite_temperature=0,
+        openrouter_input_query_rewrite_model="test/input_query_rewrite",
+        openrouter_input_query_rewrite_max_output_tokens=512,
+        openrouter_input_query_rewrite_temperature=0,
     )
     try:
         parsed = await llm.generate_structured_response(
-            QuestionRewriteLLMResponse, [], task="rewrite"
+            InputQueryRewriteLLMResponse, [], task="input_query_rewrite"
         )
     finally:
         await llm.close()
-    assert isinstance(parsed, QuestionRewriteLLMResponse)
+    assert isinstance(parsed, InputQueryRewriteLLMResponse)
     assert parsed.standalone_question == "When is payment due?"
     assert parsed.clarification_question == ""
     request = requested[0]
-    assert request["model"] == "test/rewrite" and request["max_tokens"] == 512
+    assert request["model"] == "test/input_query_rewrite" and request["max_tokens"] == 512
     assert request["temperature"] == 0
-    assert request["response_format"]["json_schema"]["name"] == "QuestionRewriteLLMResponse"
+    assert request["response_format"]["json_schema"]["name"] == "InputQueryRewriteLLMResponse"
     assert usage[0]["status"] == "succeeded" and usage[0]["cost_usd"] == 0.003
     assert usage[0]["input_tokens"] == 42 and usage[0]["output_tokens"] == 12
     assert usage[0]["cached_tokens"] == 8 and usage[0]["request_id"] == "req1"
@@ -300,14 +300,14 @@ async def test_task_context_overflow_fails_before_http_without_truncation():
         pytest.fail("Context rejection must happen before a provider request")
 
     llm = create_provider(
-        handler, openrouter_rewrite_context_tokens=1000, openrouter_rewrite_max_output_tokens=200
+        handler, openrouter_input_query_rewrite_context_tokens=1000, openrouter_input_query_rewrite_max_output_tokens=200
     )
     try:
         with pytest.raises(ContextLimitError):
             await llm.generate_structured_response(
-                QuestionRewriteLLMResponse,
+                InputQueryRewriteLLMResponse,
                 [{"role": "user", "content": "evidence " * 1000}],
-                task="rewrite",
+                task="input_query_rewrite",
             )
     finally:
         await llm.close()

@@ -197,10 +197,12 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
     """Generate and execute a fresh revision without hand-editing its ledger/index operations."""
     command.upgrade(isolated_database.alembic, PREVIOUS_REVISION)
     with isolated_database.engine.begin() as connection:
-        connection.execute(text("""
+        connection.execute(
+            text("""
             INSERT INTO ai_calls (id, model, operation, input_tokens, duration_ms, status, created_at)
             VALUES ('generated-call', 'fixture-model', 'embedding', 12, 1, 'complete', now())
-        """))
+        """)
+        )
     generated_directory = tmp_path / "migrations"
     shutil.copytree("migrations", generated_directory, ignore=shutil.ignore_patterns("__pycache__"))
     for candidate in (generated_directory / "versions").glob("d18c6a20b5e9_*.py"):
@@ -208,7 +210,10 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
     generated_config = Config("alembic.ini")
     generated_config.set_main_option("script_location", str(generated_directory))
     command.revision(
-        generated_config, message="generation regression", autogenerate=True, rev_id="generatedcheck"
+        generated_config,
+        message="generation regression",
+        autogenerate=True,
+        rev_id="generatedcheck",
     )
     generated_source = next(
         (generated_directory / "versions").glob("generatedcheck_*.py")
@@ -220,7 +225,9 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
     command.upgrade(generated_config, "head")
     with isolated_database.engine.connect() as connection:
         assert connection.scalar(select(LLMCall.input_tokens)) == 12
-        assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+        assert (
+            compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+        )
     command.downgrade(generated_config, PREVIOUS_REVISION)
     with isolated_database.engine.connect() as connection:
         assert connection.scalar(text("SELECT input_tokens FROM ai_calls")) == 12
@@ -249,7 +256,10 @@ def seed_retrieval_corpus(engine):
                 vector = [cosine] + [value * scale for value in tail]
                 rows.append(chunk_row(selected_id if selected else other_id, ordinal, vector))
             connection.execute(insert(Chunk), rows)
-        keyword = chunk_row(selected_id, 12000, None, "The zephyrquartz clause requires notice.")
+        keyword_vector = [0.8, 0.6] + [0.0] * 1534
+        keyword = chunk_row(
+            selected_id, 12000, keyword_vector, "The zephyrquartz clause requires notice."
+        )
         connection.execute(insert(Chunk), [keyword])
         connection.execute(
             insert(Chunk),
@@ -262,7 +272,7 @@ def seed_retrieval_corpus(engine):
 def test_hnsw_default_plan_filtered_recall_and_keyword_rescue(migrated_database):
     """Exercise the actual scoped query over 12,000 full-size vectors with competing sources."""
     selected_id, other_id, keyword = seed_retrieval_corpus(migrated_database.engine)
-    statement = retrieval.build_semantic_candidates_query(selected_id, QUERY_VECTOR)
+    statement = retrieval.build_semantic_candidates_query([selected_id], QUERY_VECTOR)
     with database.session() as db:
         retrieval.configure_hnsw_search(db)
         compiled = statement.compile(db.bind, compile_kwargs={"literal_binds": True})
@@ -271,20 +281,24 @@ def test_hnsw_default_plan_filtered_recall_and_keyword_rescue(migrated_database)
         plan = plan_result[0]
         assert "ix_chunks_embedding_hnsw" in plan_indexes(plan["Plan"])
         approximate = list(db.scalars(statement))
-        assert len(approximate) == 30
+        assert len(approximate) == 15
         assert {chunk.version_id for chunk in approximate} == {selected_id}
         # Adding zero to distance makes this a separate exact oracle, never an app fallback.
         exact = list(
             db.scalars(
                 select(Chunk.id)
-                .where(Chunk.version_id == selected_id, Chunk.embedding.is_not(None))
+                .where(
+                    Chunk.version_id == selected_id,
+                    Chunk.embedding.is_not(None),
+                    Chunk.embedding.cosine_distance(QUERY_VECTOR) < 0.3,
+                )
                 .order_by(Chunk.embedding.cosine_distance(QUERY_VECTOR) + 0)
-                .limit(30)
+                .limit(15)
             )
         )
         recall = len({chunk.id for chunk in approximate} & set(exact)) / len(exact)
         print(
-            f"HNSW default plan: {plan_indexes(plan['Plan'])}; recall@30={recall:.3f}; "
+            f"HNSW default plan: {plan_indexes(plan['Plan'])}; recall@15={recall:.3f}; "
             f"execution_ms={plan['Execution Time']:.3f}"
         )
         assert recall >= 0.9
@@ -302,7 +316,7 @@ def test_hnsw_default_plan_filtered_recall_and_keyword_rescue(migrated_database)
     evidence = asyncio.run(retrieval.retrieve_relevant_chunks("zephyrquartz", [selected_id], llm))
     assert keyword["id"] in {item.id for item in evidence}
     assert {item.version_id for item in evidence} == {selected_id}
-    assert len(evidence) == 8
+    assert len(evidence) == 5
     assert llm.calls == [["zephyrquartz"]]
 
 
@@ -369,3 +383,93 @@ def test_scope_revalidated_after_embedding_and_cache_reused(migrated_database, m
     assert len(evidence) == 1 and evidence[0].version_id == version_id
     assert hits == ["embedding_cache_hits"]
     assert llm.calls == []
+
+
+def cosine_vector(similarity: float) -> list[float]:
+    """Build a unit vector with the stated cosine against the deterministic query vector."""
+    return [similarity, math.sqrt(1 - similarity**2)] + [0.0] * 1534
+
+
+def test_global_candidate_and_final_limits_with_similarity_floor(migrated_database):
+    """Apply 15/15/5 across all selected sources and reject low-similarity keyword matches."""
+    selected = [seed_version("first.txt"), seed_version("second.txt")]
+    excluded = seed_version("outside.txt")
+    rows = [
+        chunk_row(selected[index % 2], index, cosine_vector(0.98 - index * 0.003), "Payment terms")
+        for index in range(24)
+    ]
+    rejected = [
+        chunk_row(selected[0], 25, cosine_vector(0.69), "Payment payment payment payment"),
+        chunk_row(selected[1], 26, None, "Payment payment payment payment"),
+        chunk_row(excluded, 27, QUERY_VECTOR, "Payment payment payment payment"),
+    ]
+    with migrated_database.engine.begin() as connection:
+        connection.execute(insert(Chunk), rows + rejected)
+    with database.session() as db:
+        retrieval.configure_hnsw_search(db)
+        semantic = list(
+            db.scalars(retrieval.build_semantic_candidates_query(selected, QUERY_VECTOR))
+        )
+        lexical = list(
+            db.scalars(retrieval.build_lexical_candidates_query("payment", selected, QUERY_VECTOR))
+        )
+        assert len(semantic) == len(lexical) == 15
+        assert {chunk.version_id for chunk in semantic} == set(selected)
+        assert not {chunk.id for chunk in semantic + lexical} & {row["id"] for row in rejected}
+    llm = FixedEmbeddingLLM()
+    evidence = asyncio.run(retrieval.retrieve_relevant_chunks("payment", selected, llm))
+    expected = retrieval.calculate_rrf(
+        [[chunk.id for chunk in semantic], [chunk.id for chunk in lexical]]
+    )[:5]
+    assert [item.id for item in evidence] == expected
+    assert len(evidence) == 5 and len({item.id for item in evidence}) == 5
+    assert llm.calls == [["payment"]]
+
+
+@pytest.mark.parametrize("qualifying_count", [0, 2])
+def test_similarity_floor_never_pads_missing_evidence(migrated_database, qualifying_count):
+    """Return fewer than five or no chunks rather than including strong lexical-only matches."""
+    selected = seed_version()
+    accepted = [
+        chunk_row(selected, index, cosine_vector(0.71 + index * 0.01), "Notice terms")
+        for index in range(qualifying_count)
+    ]
+    rejected = [
+        chunk_row(selected, 10, cosine_vector(0.69), "Notice notice notice"),
+        chunk_row(selected, 11, cosine_vector(0), "Notice notice notice"),
+        chunk_row(selected, 12, None, "Notice notice notice"),
+    ]
+    with migrated_database.engine.begin() as connection:
+        connection.execute(insert(Chunk), accepted + rejected)
+    evidence = asyncio.run(
+        retrieval.retrieve_relevant_chunks("notice", [selected], FixedEmbeddingLLM())
+    )
+    assert {item.id for item in evidence} == {str(row["id"]) for row in accepted}
+
+
+def test_similarity_floor_excludes_exact_native_distance_boundary(migrated_database, monkeypatch):
+    """Verify strict comparison using the database's own boundary value, avoiding float guesses."""
+    selected = seed_version()
+    nearer = chunk_row(selected, 0, cosine_vector(0.81), "Payment terms")
+    boundary = chunk_row(selected, 1, cosine_vector(0.8), "Payment terms")
+    farther = chunk_row(selected, 2, cosine_vector(0.79), "Payment terms")
+    with migrated_database.engine.begin() as connection:
+        connection.execute(insert(Chunk), [nearer, boundary, farther])
+    with database.session() as db:
+        distance = db.scalar(
+            select(Chunk.embedding.cosine_distance(QUERY_VECTOR)).where(Chunk.id == boundary["id"])
+        )
+    assert distance is not None
+    monkeypatch.setattr(retrieval, "MAX_COSINE_DISTANCE", distance)
+    with database.session() as db:
+        retrieval.configure_hnsw_search(db)
+        semantic = list(
+            db.scalars(retrieval.build_semantic_candidates_query([selected], QUERY_VECTOR))
+        )
+        lexical = list(
+            db.scalars(
+                retrieval.build_lexical_candidates_query("payment", [selected], QUERY_VECTOR)
+            )
+        )
+        assert [chunk.id for chunk in semantic] == [nearer["id"]]
+        assert [chunk.id for chunk in lexical] == [nearer["id"]]

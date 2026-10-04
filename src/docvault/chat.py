@@ -15,14 +15,18 @@ from docvault.cache import (
 )
 from docvault.config import get_settings
 from docvault.db import session
-from docvault.documents import require_versions
+from docvault.documents import require_document, require_version, require_versions
 from docvault.errors import AppError
 from docvault.llm.graphs import run_document_chat_workflow
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import ProviderError
 from docvault.llm.types import ChatGenerationLLMResponse, Evidence
-from docvault.models import Chat, Message, now
-from docvault.retrieval import build_public_citation, retrieve_relevant_chunks
+from docvault.models import Chat, Message, Version, now
+from docvault.retrieval import (
+    RETRIEVAL_CONFIGURATION,
+    build_public_citation,
+    retrieve_relevant_chunks,
+)
 
 ACTIVE_TASKS: dict[str, asyncio.Task] = {}
 
@@ -73,6 +77,28 @@ def load_visible_chat_messages(db: Session, chat_id: str) -> list[Message]:
     )
     latest = {m.parent_id: m.id for m in messages if m.role == "assistant"}
     return [m for m in messages if m.role == "user" or latest.get(m.parent_id) == m.id]
+
+
+def require_current_chat_versions(db: Session, version_ids: list[str]) -> list[Version]:
+    """Resolve each selected document to one active ready version for a new chat turn.
+
+    Older input IDs identify the document, not a pinned historical Q&A source. Historical
+    messages, retries and explicit comparison/summary requests retain their version IDs.
+    """
+    selected = require_versions(db, version_ids, ready=False)
+    versions, document_ids = [], set()
+    for selection in selected:
+        if selection.document_id in document_ids:
+            continue
+        document = require_document(db, selection.document_id)
+        if document.current_version_id is None:
+            raise AppError(409, "document_not_ready", "This document has no ready version yet.")
+        current = require_version(db, document.current_version_id, ready=True)
+        if current.document_id != document.id:
+            raise AppError(409, "document_not_ready", "The document's active version is invalid.")
+        versions.append(current)
+        document_ids.add(document.id)
+    return versions
 
 
 def reserve_assistant_response(
@@ -136,7 +162,10 @@ def reserve_assistant_response(
             if content is None or not content.strip():
                 raise AppError(422, "invalid_message", "Enter a question.")
             question = content.strip()
-            versions = chat.version_ids
+            versions = [
+                version.id for version in require_current_chat_versions(db, chat.version_ids)
+            ]
+            chat.version_ids = versions
             user = Message(chat_id=chat_id, role="user", content=question, version_ids=versions)
             db.add(user)
             db.flush()
@@ -251,9 +280,10 @@ async def generate_assistant_response(message_id: str, emit_generation_event):
                     history,
                     [
                         build_generation_identity(llm.generation_model(task), task)
-                        for task in ("chat", "rewrite")
+                        for task in ("chat", "input_query_rewrite")
                     ],
                     settings.openrouter_embedding_model,
+                    RETRIEVAL_CONFIGURATION,
                 ]
             )
         cached = None if is_retry else cache_get(key)

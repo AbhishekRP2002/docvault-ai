@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from docvault.cache import cache_get, cache_set, calculate_json_fingerprint, count_metric
 from docvault.config import get_settings
@@ -8,15 +9,25 @@ from docvault.db import session
 from docvault.documents import require_versions
 from docvault.errors import AppError
 from docvault.llm.types import Evidence
-from docvault.models import Chunk
+from docvault.models import Chunk, Version
+
+SEMANTIC_CANDIDATE_LIMIT = 15
+LEXICAL_CANDIDATE_LIMIT = 15
+RETRIEVED_CHUNK_LIMIT = 5
+MIN_COSINE_SIMILARITY = 0.7
+# pgvector returns cosine distance; similarity > 0.7 means distance < 0.3.
+MAX_COSINE_DISTANCE = 0.3
+RETRIEVAL_CONFIGURATION = {
+    "pipeline": "hybrid-global-rrf-v3",
+    "semantic_candidates": SEMANTIC_CANDIDATE_LIMIT,
+    "lexical_candidates": LEXICAL_CANDIDATE_LIMIT,
+    "final_chunks": RETRIEVED_CHUNK_LIMIT,
+    "min_cosine_similarity": MIN_COSINE_SIMILARITY,
+}
 
 
 def calculate_rrf(rankings: list[list[str]], constant: int = 60) -> list[str]:
-    """Return IDs ordered by reciprocal rank fusion, with deterministic ties.
-
-    pgvector-python provides an RRF SQL example, not an importable helper:
-    https://github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py
-    """
+    """Return IDs ordered by reciprocal rank fusion, with deterministic ties."""
     scores = defaultdict(float)
     for ranking in rankings:
         for rank, identifier in enumerate(ranking, 1):
@@ -24,7 +35,7 @@ def calculate_rrf(rankings: list[list[str]], constant: int = 60) -> list[str]:
     return sorted(scores, key=lambda identifier: (-scores[identifier], identifier))
 
 
-def create_cited_evidence_record(chunk: Chunk, version) -> Evidence:
+def create_cited_evidence_record(chunk: Chunk, version: Version) -> Evidence:
     """Combine stored chunk content and source metadata into a citation-ready evidence record."""
     return Evidence(
         id=chunk.id,
@@ -37,7 +48,9 @@ def create_cited_evidence_record(chunk: Chunk, version) -> Evidence:
     )
 
 
-def require_compatible_versions(db, version_ids: list[str], embedding_model: str):
+def require_compatible_versions(
+    db: Session, version_ids: list[str], embedding_model: str
+) -> list[Version]:
     """Reject unavailable sources or sources indexed with a different embedding model."""
     versions = require_versions(db, version_ids)
     if any(version.embedding_model != embedding_model for version in versions):
@@ -49,7 +62,7 @@ def require_compatible_versions(db, version_ids: list[str], embedding_model: str
     return versions
 
 
-def configure_hnsw_search(db) -> None:
+def configure_hnsw_search(db: Session) -> None:
     """Enable ordered iterative HNSW search within the current database transaction only."""
     # pgvector >=0.8 continues scanning when version filtering discards initial neighbors.
     # https://github.com/pgvector/pgvector#iterative-index-scans
@@ -57,21 +70,55 @@ def configure_hnsw_search(db) -> None:
     db.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
 
 
-def build_semantic_candidates_query(version_id: str, vector: list[float]):
-    """Build a scoped nearest-neighbor query eligible for the native cosine HNSW index."""
+def build_semantic_candidates_query(version_ids: list[str], vector: list[float]):
+    """Fetch scoped HNSW neighbors first, then apply the strict cosine-distance floor.
+
+    A materialized CTE keeps distance filtering outside the nearest-neighbor scan, as
+    recommended by pgvector; source scope and the 15-candidate cap stay inside it.
+    """
+    nearest = (
+        select(Chunk.id, Chunk.embedding.cosine_distance(vector).label("distance"))
+        .where(
+            Chunk.version_id.in_(version_ids),
+            Chunk.embedding.is_not(None),
+        )
+        .order_by(Chunk.embedding.cosine_distance(vector))
+        .limit(SEMANTIC_CANDIDATE_LIMIT)
+        .cte("nearest_chunks")
+        .prefix_with("MATERIALIZED")
+    )
+    # https://github.com/pgvector/pgvector#iterative-index-scans
     return (
         select(Chunk)
-        .where(Chunk.version_id == version_id, Chunk.embedding.is_not(None))
-        .order_by(Chunk.embedding.cosine_distance(vector))
-        .limit(30)
+        .join(nearest, Chunk.id == nearest.c.id)
+        .where(nearest.c.distance < MAX_COSINE_DISTANCE)
+        .order_by(nearest.c.distance)
+    )
+
+
+def build_lexical_candidates_query(query: str, version_ids: list[str], vector: list[float]):
+    """Rank scoped full-text matches that also satisfy the shared cosine-similarity floor."""
+    terms = func.websearch_to_tsquery("english", query)
+    return (
+        select(Chunk)
+        .where(
+            Chunk.version_id.in_(version_ids),
+            Chunk.search.op("@@")(terms),
+            Chunk.embedding.is_not(None),
+            Chunk.embedding.cosine_distance(vector) < MAX_COSINE_DISTANCE,
+        )
+        .order_by(func.ts_rank_cd(Chunk.search, terms).desc(), Chunk.id)
+        .limit(LEXICAL_CANDIDATE_LIMIT)
     )
 
 
 async def retrieve_relevant_chunks(query: str, version_ids: list[str], llm) -> list[Evidence]:
-    """Fuse scoped cosine and full-text rankings into evidence with selected-source coverage.
+    """Fuse 15 global semantic/lexical candidates into at most five qualifying chunks.
 
     Reuse query embeddings and reject versions indexed with a different embedding model.
     HNSW is approximate; iterative filtering has bounded work and no exhaustive fallback.
+    Both candidate sets require cosine similarity strictly above 0.7; return fewer or none
+    when evidence does not qualify, without padding results or guaranteeing every source.
     """
     settings = get_settings()
     with session() as db:
@@ -88,25 +135,18 @@ async def retrieve_relevant_chunks(query: str, version_ids: list[str], llm) -> l
     with session() as db:
         versions = require_compatible_versions(db, version_ids, settings.openrouter_embedding_model)
         configure_hnsw_search(db)
-        evidence, chosen, remaining = {}, [], []
-        for version in versions:
-            dense = list(db.scalars(build_semantic_candidates_query(version.id, vector)))
-            terms = func.websearch_to_tsquery("english", query)
-            lexical = list(
-                db.scalars(
-                    select(Chunk)
-                    .where(Chunk.version_id == version.id, Chunk.search.op("@@")(terms))
-                    .order_by(func.ts_rank_cd(Chunk.search, terms).desc())
-                    .limit(30)
-                )
-            )
-            for chunk in dense + lexical:
-                evidence[chunk.id] = create_cited_evidence_record(chunk, version)
-            ranked = calculate_rrf([[c.id for c in dense], [c.id for c in lexical]])
-            chosen.extend(ranked[:2])
-            remaining.extend(ranked[2:])
-        # Ensure selected sources are represented; no selected-document or evidence-token cap.
-        selected = list(dict.fromkeys(chosen + remaining))[: max(8, len(versions) * 2)]
+        versions_by_id = {version.id: version for version in versions}
+        dense = list(db.scalars(build_semantic_candidates_query(list(versions_by_id), vector)))
+        lexical = list(
+            db.scalars(build_lexical_candidates_query(query, list(versions_by_id), vector))
+        )
+        evidence = {
+            chunk.id: create_cited_evidence_record(chunk, versions_by_id[chunk.version_id])
+            for chunk in dense + lexical
+        }
+        selected = calculate_rrf([[c.id for c in dense], [c.id for c in lexical]])[
+            :RETRIEVED_CHUNK_LIMIT
+        ]
         return [evidence[identifier] for identifier in selected]
 
 

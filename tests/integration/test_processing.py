@@ -9,6 +9,7 @@ import hashlib
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from support import require_persisted_row
 
 from docvault import cache, config, jobs, processing
 from docvault import db as database
+from docvault.documents import require_document
 from docvault.llm.config import GenerationModelConfig
 from docvault.llm.provider import ProviderError
 from docvault.llm.types import (
@@ -514,3 +516,153 @@ def test_changed_generation_configuration_rejects_queued_artifact_before_llm_cal
         assert artifact.error is not None and "configuration changed" in artifact.error
         assert require_persisted_row(db, Job, job_id).status == "failed"
     assert llm.generations == 0
+
+
+def test_new_version_reuses_unchanged_vectors_and_current_evidence_excludes_removed_chunks(
+    isolated_db, monkeypatch
+):
+    """Embed only changed inputs while retaining historical chunks for their pinned citations."""
+    retained = "Payment is due in thirty days."
+    removed = "The outdated annual fee is nine hundred dollars."
+    added = "The updated annual fee is twelve hundred dollars."
+
+    def parse_line_chunks(path, mime_type, filename):
+        """Give each fixture line an independent input hash and its version-specific location."""
+        text = path.read_text()
+        return ParsedDocument(
+            text=text,
+            chunks=[
+                ParsedChunk(
+                    text=line,
+                    embedding_text=line,
+                    location={"line_start": index + 1},
+                    token_count=len(line.split()),
+                )
+                for index, line in enumerate(text.splitlines())
+            ],
+            page_count=None,
+            parser="line-fixture",
+        )
+
+    class DistinctVectorLLM(FakeLLM):
+        async def embed_texts(self, texts):
+            """Record billed inputs and give each provider batch visibly different vectors."""
+            self.batches.append(texts)
+            return [
+                [float(len(self.batches) * 10 + index + 1)] + [0.0] * 1535
+                for index, _ in enumerate(texts)
+            ]
+
+    llm = DistinctVectorLLM()
+    monkeypatch.setattr(processing, "parse_document_file", parse_line_chunks)
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
+    document_id, old_id, old_job = seed_version(f"{removed}\n{retained}")
+    jobs.run_job(old_job)
+    with database.session() as db:
+        old_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == old_id)))
+        old_retained = next(chunk for chunk in old_chunks if chunk.text == retained)
+        retained_id = old_retained.id
+        retained_hash = old_retained.input_hash
+        retained_vector = old_retained.embedding
+        assert retained_vector is not None
+        assert old_retained.location == {"line_start": 2}
+        assert require_persisted_row(db, Document, document_id).current_version_id == old_id
+    _, new_id, new_job = seed_version(f"{retained}\n{added}", document_id, 2)
+    with database.session() as db:
+        document = require_persisted_row(db, Document, document_id)
+        assert document.latest_version_id == new_id
+        assert document.current_version_id == old_id
+        assert require_persisted_row(db, Version, new_id).status == "queued"
+    jobs.run_job(new_job)
+    assert llm.batches == [[removed, retained], [added]]
+    with database.session() as db:
+        document = require_persisted_row(db, Document, document_id)
+        assert document.current_version_id == new_id and document.latest_version_id == new_id
+        assert require_persisted_row(db, Version, old_id).status == "ready"
+        assert require_persisted_row(db, Version, new_id).status == "ready"
+        current_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == new_id)))
+        current_retained = next(chunk for chunk in current_chunks if chunk.text == retained)
+        current_added = next(chunk for chunk in current_chunks if chunk.text == added)
+        assert current_retained.id != retained_id
+        assert current_retained.input_hash == retained_hash
+        assert current_retained.embedding == retained_vector
+        assert current_retained.location == {"line_start": 1}
+        assert current_added.embedding is not None and current_added.embedding != retained_vector
+        current_version_id = document.current_version_id
+        assert current_version_id is not None
+        current_evidence = processing.load_document_version_evidence(db, current_version_id)
+        assert {item.text for item in current_evidence} == {retained, added}
+        assert {item.version_id for item in current_evidence} == {new_id}
+        assert removed not in {item.text for item in current_evidence}
+        historical_evidence = processing.load_document_version_evidence(db, old_id)
+        assert {item.text for item in historical_evidence} == {removed, retained}
+        assert retained_id in {item.id for item in historical_evidence}
+
+
+def test_older_activation_waits_for_document_lock_and_preserves_newer_committed_pointer(
+    isolated_db, monkeypatch
+):
+    """Avoid a stale current-version read while a newer activation transaction is uncommitted."""
+    document_id, old_id, old_job = seed_version("Older complete index.")
+    _, new_id, _ = seed_version("Newer complete index.", document_id, 2)
+    with database.session() as db, db.begin():
+        for identifier in (old_id, new_id):
+            version = require_persisted_row(db, Version, identifier)
+            version.chunk_count = 1
+            version.embedding_model = config.get_settings().openrouter_embedding_model
+            db.add(
+                Chunk(
+                    version_id=identifier,
+                    ordinal=0,
+                    text=version.filename,
+                    embedding_text=version.filename,
+                    input_hash=identifier,
+                    location={"line_start": 1},
+                    token_count=1,
+                    embedding=[1.0] + [0.0] * 1535,
+                )
+            )
+    token = jobs._claim_pending_job(old_job)
+    assert token is not None
+    started = threading.Event()
+    backend_pids = []
+
+    def observe_checkpoint(db, identifier, claim_token, stage=None):
+        """Identify the activation connection before checkpoint acquires its source lock."""
+        backend_pid = db.scalar(text("SELECT pg_backend_pid()"))
+        assert backend_pid is not None
+        backend_pids.append(backend_pid)
+        started.set()
+        return jobs.job_checkpoint(db, identifier, claim_token, stage)
+
+    monkeypatch.setattr(processing, "job_checkpoint", observe_checkpoint)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with database.session() as holder, holder.begin():
+            document = require_document(holder, document_id, lock=True)
+            require_persisted_row(holder, Version, new_id).status = "ready"
+            document.current_version_id = new_id
+            holder.flush()
+            activation = pool.submit(processing._activate_ready_version, old_job, token)
+            assert started.wait(timeout=5), "Older activation did not reach its job checkpoint."
+            blocked = False
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not activation.done():
+                with database.session() as observer:
+                    blocked = bool(
+                        observer.scalar(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                                "WHERE pid = :pid AND cardinality(pg_blocking_pids(pid)) > 0)"
+                            ),
+                            {"pid": backend_pids[0]},
+                        )
+                    )
+                if blocked:
+                    break
+                time.sleep(0.01)
+        activation.result(timeout=5)
+    assert blocked, "Older activation did not overlap the newer pointer's uncommitted update."
+    with database.session() as db:
+        assert require_persisted_row(db, Document, document_id).current_version_id == new_id
+        assert require_persisted_row(db, Version, old_id).status == "ready"
+        assert require_persisted_row(db, Version, new_id).status == "ready"

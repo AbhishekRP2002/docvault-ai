@@ -9,8 +9,7 @@ from docvault.llm.prompts import (
     SUMMARY_WORD_TARGETS,
     build_summary_system_prompt,
 )
-from docvault.llm.protocols import DocumentAnalysisLLM
-from docvault.llm.provider import ContextLimitError, token_count
+from docvault.llm.provider import ContextLimitError, OpenRouterLLM, token_count
 from docvault.llm.types import (
     ComparisonDimensionLLMResponse,
     DocumentComparisonCell,
@@ -24,7 +23,7 @@ def _serialize_prompt_payload(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _calculate_section_token_capacity(llm: DocumentAnalysisLLM, task: LLMTask) -> int:
+def _calculate_section_token_capacity(llm: OpenRouterLLM, task: LLMTask) -> int:
     """Return section capacity after prompt/output reservations, rejecting unusable contexts."""
     # Capacity follows the configured provider model. This is not a file limit or
     # a product evidence budget. Leave room for instructions, schema and output.
@@ -85,7 +84,7 @@ def _validate_summary_citations(result: InsightsGenerationLLMResponse, available
 
 
 async def generate_document_summary(
-    llm: DocumentAnalysisLLM,
+    llm: OpenRouterLLM,
     chunks: list[Evidence],
     length: str = "short",
     focus_areas: list[str] | None = None,
@@ -174,7 +173,7 @@ async def generate_document_summary(
 
 
 async def _extract_comparison_dimension(
-    llm: DocumentAnalysisLLM,
+    llm: OpenRouterLLM,
     chunks: list[Evidence],
     dimension: str,
 ) -> ComparisonDimensionLLMResponse:
@@ -240,7 +239,7 @@ async def _extract_comparison_dimension(
 
 
 async def generate_document_comparison(
-    llm: DocumentAnalysisLLM,
+    llm: OpenRouterLLM,
     evidence_by_version: dict[str, list[Evidence]],
     dimensions: list[str],
 ) -> dict:

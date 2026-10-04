@@ -27,13 +27,14 @@ class ChatGenerationLLMResponse(StrictModel):
     """Grounded chat reply, suggested follow-ups, source references, and answer outcome."""
 
     response: str = Field(
-        min_length=1, description="User-facing answer with inline source markers."
+        min_length=1,
+        description="Direct user-facing answer or limitation, with exact evidence IDs beside claims.",
     )
     suggestions: list[str] = Field(
         max_length=3, description="Zero to three useful follow-up questions for the user."
     )
     citation_ids: list[str] = Field(
-        description="Server-issued evidence IDs referenced by the answer."
+        description="Distinct original evidence IDs actually used in response, in first-use order."
     )
     outcome: Literal["answered", "insufficient_evidence", "clarification_needed"] = Field(
         description="Whether the answer is supported, lacks evidence, or needs user clarification."
@@ -58,17 +59,20 @@ class ParsedDocument(StrictModel):
     parser: str
 
 
-class QuestionRewriteLLMResponse(StrictModel):
-    """Standalone retrieval question and any clarification needed to resolve references."""
+class InputQueryRewriteLLMResponse(StrictModel):
+    """Standalone input query and the clarification needed for ambiguous conversation references."""
 
-    standalone_question: str = Field(
-        min_length=1, description="Self-contained retrieval question resolved from conversation."
-    )
+    # Decide ambiguity before generating a rewritten query; ordering guides output,
+    # but only evaluation can establish whether a model makes the correct decision.
     needs_clarification: bool = Field(
-        description="True when conversation cannot resolve an ambiguous user reference."
+        description="True when a missing or ambiguous reference prevents reliable retrieval, including a singular reference with multiple plausible subjects."
     )
     clarification_question: str = Field(
-        description="Question to ask the user when clarification is needed; otherwise empty."
+        description="One concise question resolving the ambiguity when needed; otherwise empty."
+    )
+    standalone_question: str = Field(
+        min_length=1,
+        description="Latest question with clear references resolved; never broaden an ambiguous singular reference to multiple entities.",
     )
 
 
@@ -76,17 +80,21 @@ class CitedKeyInsight(StrictModel):
     """One grounded insight within the complete insights generation response."""
 
     insight_text: str = Field(
-        description="Document fact or insight supported by the cited evidence."
+        description="Material document fact or qualification supported by this insight's own citations."
     )
     citation_ids: list[str] = Field(
-        min_length=1, description="Server-issued evidence IDs supporting this specific insight."
+        min_length=1,
+        description="Original server-issued source IDs supporting this insight, not intermediate summaries.",
     )
 
 
 class InsightsGenerationLLMResponse(StrictModel):
     """Document summary, classification, grounded insights, and suggested follow-ups."""
 
-    summary: str = Field(min_length=1, description="Summary of all supplied source sections.")
+    summary: str = Field(
+        min_length=1,
+        description="Grounded summary of all supplied sections, retaining material conflicts and limits.",
+    )
     category: str = Field(description="Document category inferred from the supplied content.")
     tags: list[str] = Field(max_length=8, description="Up to eight content-based document tags.")
     key_insights: list[CitedKeyInsight] = Field(
@@ -96,7 +104,8 @@ class InsightsGenerationLLMResponse(StrictModel):
         max_length=3, description="Zero to three useful follow-up questions about the document."
     )
     citation_ids: list[str] = Field(
-        min_length=1, description="Server-issued evidence IDs supporting the document summary."
+        min_length=1,
+        description="Distinct original server-issued source IDs supporting summary through reduction.",
     )
 
 
@@ -113,11 +122,11 @@ class ComparisonDimensionLLMResponse(StrictModel):
     """Cited finding for one requested comparison dimension across supplied source sections."""
 
     finding_text: str = Field(
-        description="Finding for the requested dimension, or an absence notice."
+        description="Grounded finding with material qualifications/conflicts, or a scoped missing-information notice."
     )
     status: Literal["found", "not_found"] = Field(
-        description="Whether the supplied evidence supports a finding for this dimension."
+        description="found for supported facts including explicit negatives; not_found for missing evidence."
     )
     citation_ids: list[str] = Field(
-        description="Supporting server-issued evidence IDs; empty when status is not_found."
+        description="Original source IDs supporting finding_text; nonempty for found, empty for not_found."
     )

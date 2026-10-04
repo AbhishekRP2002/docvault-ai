@@ -4,6 +4,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from docvault.cache import notify_change
 from docvault.chat import (
@@ -11,6 +12,7 @@ from docvault.chat import (
     generate_assistant_response,
     load_visible_chat_messages,
     require_chat,
+    require_current_chat_versions,
     require_message,
     reserve_assistant_response,
     serialize_message_response,
@@ -18,22 +20,37 @@ from docvault.chat import (
 )
 from docvault.config import get_settings
 from docvault.db import session
-from docvault.documents import require_versions
 from docvault.errors import AppError
 from docvault.limits import enforce_request_rate_limit
-from docvault.models import Chat, Message, now
+from docvault.models import Chat, Document, Message, Version, now
 from docvault.schemas import ChatCreate, ChatUpdate, MessageCreate
 
 router = APIRouter(prefix="/v1/chats", tags=["chats"])
 RequestKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
 
-def serialize_chat_response(chat: Chat) -> dict:
-    """Serialize a chat's identity, selected versions, and timestamps for the API."""
+def serialize_chat_response(db: Session, chat: Chat) -> dict:
+    """Project live selections onto current ready revisions without changing stored history.
+
+    Retain missing/deleted source IDs so historical chats remain visible and admission can
+    report source unavailability instead of failing the entire session list.
+    """
+    current_ids = {
+        selected_id: current_id
+        for selected_id, current_id in db.execute(
+            select(Version.id, Document.current_version_id)
+            .join(Document)
+            .where(Version.id.in_(chat.version_ids), Document.deleted_at.is_(None))
+        )
+    }
     return dict(
         id=chat.id,
         title=chat.title,
-        version_ids=chat.version_ids,
+        version_ids=list(
+            dict.fromkeys(
+                current_ids.get(identifier) or identifier for identifier in chat.version_ids
+            )
+        ),
         created_at=chat.created_at,
         updated_at=chat.updated_at,
     )
@@ -45,7 +62,7 @@ def list_chat_sessions():
     with session() as db:
         return {
             "items": [
-                serialize_chat_response(chat)
+                serialize_chat_response(db, chat)
                 for chat in db.scalars(select(Chat).order_by(Chat.updated_at.desc()))
             ]
         }
@@ -55,11 +72,11 @@ def list_chat_sessions():
 def create_chat(body: ChatCreate):
     """Persist a chat scoped to validated ready versions and return its metadata."""
     with session() as db, db.begin():
-        versions = require_versions(db, body.version_ids)
+        versions = require_current_chat_versions(db, body.version_ids)
         chat = Chat(title=body.title.strip() or "New chat", version_ids=[v.id for v in versions])
         db.add(chat)
         db.flush()
-        return serialize_chat_response(chat)
+        return serialize_chat_response(db, chat)
 
 
 @router.patch("/{chat_id}")
@@ -73,9 +90,9 @@ def update_chat(chat_id: str, body: ChatUpdate):
             chat.title = body.title.strip()
         if body.version_ids is not None:
             # Running turns already hold an immutable scope snapshot.
-            chat.version_ids = [v.id for v in require_versions(db, body.version_ids)]
+            chat.version_ids = [v.id for v in require_current_chat_versions(db, body.version_ids)]
         chat.updated_at = now()
-        result = serialize_chat_response(chat)
+        result = serialize_chat_response(db, chat)
     notify_change()
     return result
 

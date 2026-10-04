@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from pydantic import ValidationError
+from pydantic import AliasChoices, ValidationError
 
 from docvault.cache import calculate_json_fingerprint
 from docvault.config import Settings
@@ -12,10 +12,10 @@ from docvault.llm.config import (
     ChatModelSettings,
     ComparisonModelSettings,
     EmbeddingModelSettings,
+    InputQueryRewriteModelSettings,
     LLMSettings,
     LLMTask,
     OpenRouterSettings,
-    RewriteModelSettings,
     SummaryModelSettings,
 )
 from docvault.llm.types import ChatGenerationLLMResponse
@@ -23,15 +23,80 @@ from docvault.llm.types import ChatGenerationLLMResponse
 
 @pytest.fixture
 def clean_model_environment(monkeypatch):
-    for name in LLMSettings.model_fields:
+    for name, field in LLMSettings.model_fields.items():
         monkeypatch.delenv(name.upper(), raising=False)
+        if isinstance(field.validation_alias, AliasChoices):
+            for alias in field.validation_alias.choices:
+                if isinstance(alias, str):
+                    monkeypatch.delenv(alias, raising=False)
+
+
+@pytest.mark.parametrize("settings_class", [InputQueryRewriteModelSettings, LLMSettings])
+def test_legacy_input_query_rewrite_environment_remains_supported(
+    clean_model_environment, monkeypatch, settings_class
+):
+    """Old rewrite environment names still configure the explicitly named task."""
+    monkeypatch.setenv("OPENROUTER_REWRITE_MODEL", "test/legacy-input-query-rewrite")
+    monkeypatch.setenv("OPENROUTER_REWRITE_CONTEXT_TOKENS", "12000")
+    monkeypatch.setenv("OPENROUTER_REWRITE_MAX_OUTPUT_TOKENS", "700")
+    monkeypatch.setenv("OPENROUTER_REWRITE_TEMPERATURE", "0.2")
+    settings = settings_class(_env_file=None)
+    assert settings.input_query_rewrite_model_configuration().model_dump() == {
+        "model": "test/legacy-input-query-rewrite",
+        "context_tokens": 12000,
+        "max_output_tokens": 700,
+        "temperature": 0.2,
+    }
+
+
+@pytest.mark.parametrize("settings_class", [InputQueryRewriteModelSettings, LLMSettings])
+def test_explicit_input_query_rewrite_environment_takes_precedence(
+    clean_model_environment, monkeypatch, settings_class
+):
+    """New names win when both environment aliases are defined in the same source."""
+    for name, old_value, new_value in [
+        ("MODEL", "test/legacy", "test/explicit"),
+        ("CONTEXT_TOKENS", "10000", "20000"),
+        ("MAX_OUTPUT_TOKENS", "500", "1000"),
+        ("TEMPERATURE", "0.1", "0.3"),
+    ]:
+        monkeypatch.setenv(f"OPENROUTER_REWRITE_{name}", old_value)
+        monkeypatch.setenv(f"OPENROUTER_INPUT_QUERY_REWRITE_{name}", new_value)
+    settings = settings_class(_env_file=None)
+    assert settings.input_query_rewrite_model_configuration().model_dump() == {
+        "model": "test/explicit",
+        "context_tokens": 20000,
+        "max_output_tokens": 1000,
+        "temperature": 0.3,
+    }
+
+
+def test_input_query_rewrite_field_names_are_valid_constructor_inputs(clean_model_environment):
+    """Environment aliases do not hide the new Python field names from constructors."""
+    settings = InputQueryRewriteModelSettings(
+        _env_file=None,
+        openrouter_input_query_rewrite_model="test/constructor",
+        openrouter_input_query_rewrite_context_tokens=30000,
+        openrouter_input_query_rewrite_max_output_tokens=1500,
+        openrouter_input_query_rewrite_temperature=0,
+    )
+    assert settings.input_query_rewrite_model_configuration().model_dump() == {
+        "model": "test/constructor",
+        "context_tokens": 30000,
+        "max_output_tokens": 1500,
+        "temperature": 0,
+    }
 
 
 @pytest.mark.parametrize(
     "settings_class,environment_name,configuration_method",
     [
         (ChatModelSettings, "OPENROUTER_CHAT_MODEL", "chat_model_configuration"),
-        (RewriteModelSettings, "OPENROUTER_REWRITE_MODEL", "rewrite_model_configuration"),
+        (
+            InputQueryRewriteModelSettings,
+            "OPENROUTER_INPUT_QUERY_REWRITE_MODEL",
+            "input_query_rewrite_model_configuration",
+        ),
         (SummaryModelSettings, "OPENROUTER_SUMMARY_MODEL", "summary_model_configuration"),
         (
             ComparisonModelSettings,
@@ -63,7 +128,7 @@ def test_task_settings_own_disjoint_fields_and_aggregate_preserves_them():
     settings_classes = (
         OpenRouterSettings,
         ChatModelSettings,
-        RewriteModelSettings,
+        InputQueryRewriteModelSettings,
         SummaryModelSettings,
         ComparisonModelSettings,
         EmbeddingModelSettings,
@@ -98,12 +163,12 @@ def test_explicit_dotenv_load_and_environment_precedence(
     dotenv = tmp_path / "models.env"
     dotenv.write_text(
         "OPENROUTER_SUMMARY_MODEL=test/dotenv-summary\n"
-        "OPENROUTER_REWRITE_MODEL=test/dotenv-rewrite\n"
+        "OPENROUTER_INPUT_QUERY_REWRITE_MODEL=test/dotenv-rewrite\n"
     )
     monkeypatch.setenv("OPENROUTER_SUMMARY_MODEL", "test/environment-summary")
     settings = LLMSettings(_env_file=dotenv)
     assert settings.generation_model("summary").model == "test/environment-summary"
-    assert settings.generation_model("rewrite").model == "test/dotenv-rewrite"
+    assert settings.generation_model("input_query_rewrite").model == "test/dotenv-rewrite"
 
 
 def test_default_dotenv_is_respected_and_none_disables_it(
@@ -129,7 +194,7 @@ def test_dotenv_values_remain_validated(clean_model_environment, tmp_path):
     "task,model",
     [
         ("chat", "openai/gpt-4.1-mini"),
-        ("rewrite", "openai/gpt-4.1-nano"),
+        ("input_query_rewrite", "openai/gpt-4.1-nano"),
         ("summary", "openai/gpt-4.1-mini"),
         ("comparison", "openai/gpt-4.1"),
     ],
@@ -149,10 +214,10 @@ def test_environment_overrides_are_independent_for_each_task(clean_model_environ
         "OPENROUTER_CONTEXT_TOKENS": "50000",
         "OPENROUTER_MAX_OUTPUT_TOKENS": "2000",
         "OPENROUTER_CHAT_TEMPERATURE": "0.1",
-        "OPENROUTER_REWRITE_MODEL": "test/rewrite",
-        "OPENROUTER_REWRITE_CONTEXT_TOKENS": "10000",
-        "OPENROUTER_REWRITE_MAX_OUTPUT_TOKENS": "500",
-        "OPENROUTER_REWRITE_TEMPERATURE": "0",
+        "OPENROUTER_INPUT_QUERY_REWRITE_MODEL": "test/input_query_rewrite",
+        "OPENROUTER_INPUT_QUERY_REWRITE_CONTEXT_TOKENS": "10000",
+        "OPENROUTER_INPUT_QUERY_REWRITE_MAX_OUTPUT_TOKENS": "500",
+        "OPENROUTER_INPUT_QUERY_REWRITE_TEMPERATURE": "0",
         "OPENROUTER_SUMMARY_MODEL": "test/summary",
         "OPENROUTER_SUMMARY_CONTEXT_TOKENS": "90000",
         "OPENROUTER_SUMMARY_MAX_OUTPUT_TOKENS": "3000",
@@ -172,7 +237,7 @@ def test_environment_overrides_are_independent_for_each_task(clean_model_environ
     settings = LLMSettings(_env_file=None)
     configurations: list[tuple[LLMTask, int, int, float]] = [
         ("chat", 50000, 2000, 0.1),
-        ("rewrite", 10000, 500, 0),
+        ("input_query_rewrite", 10000, 500, 0),
         ("summary", 90000, 3000, 0.2),
         ("comparison", 120000, 4000, 0.3),
     ]
@@ -212,7 +277,7 @@ def test_each_generation_setting_changes_reuse_identity(clean_model_environment,
 
 def test_prompt_changes_invalidate_only_the_matching_task(clean_model_environment, monkeypatch):
     settings = LLMSettings(_env_file=None)
-    tasks: tuple[LLMTask, ...] = ("chat", "rewrite", "summary", "comparison")
+    tasks: tuple[LLMTask, ...] = ("chat", "input_query_rewrite", "summary", "comparison")
     original: dict[LLMTask, dict] = {
         task: prompts.build_generation_identity(settings.generation_model(task), task)
         for task in tasks
@@ -261,7 +326,7 @@ def test_model_override_does_not_change_unrelated_tasks(clean_model_environment,
     original = LLMSettings(_env_file=None)
     monkeypatch.setenv("OPENROUTER_SUMMARY_MODEL", "test/summary-override")
     changed = LLMSettings(_env_file=None)
-    for task in ("chat", "rewrite", "summary", "comparison"):
+    for task in ("chat", "input_query_rewrite", "summary", "comparison"):
         original_identity = prompts.build_generation_identity(original.generation_model(task), task)
         changed_identity = prompts.build_generation_identity(changed.generation_model(task), task)
         assert (original_identity != changed_identity) == (task == "summary")
