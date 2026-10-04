@@ -17,7 +17,7 @@ Delivery is staged, but the target includes every bonus item in section 13. The 
 | Topic | Initial decision |
 |---|---|
 | Deadline | Awaiting user input; milestones are ordered without assuming a submission date. |
-| Providers | OpenRouter for generation and embeddings through the OpenAI Python SDK, with `base_url=https://openrouter.ai/api/v1`. Initial models: `openai/gpt-4.1-mini` and `openai/text-embedding-3-small`, subject to live account/model checks. The user reports the provider key is configured in local `.env`; keep it server-side. |
+| Providers | OpenRouter for generation and embeddings through the OpenAI Python SDK, with `base_url=https://openrouter.ai/api/v1`. Independent task configurations: chat/summaries default to `openai/gpt-4.1-mini`, rewriting to `openai/gpt-4.1-nano`, comparisons to `openai/gpt-4.1`, embeddings to `openai/text-embedding-3-small`. Each is environment-overridable; actual account/model checks are recorded in the ledger. The user reports the provider key is configured in local `.env`; keep it server-side. |
 | Deployment | Reproducible localhost Docker Compose demo. Bind published service ports to loopback. Public deployment is outside the current scope. |
 | Formats | PDF, DOCX, UTF-8 TXT; digital and scanned PDFs. English is the first tested language. Other languages are best effort and clearly labeled. |
 | Limits | Configurable upload safeguards: 25 MiB/file, 100 PDF pages, 10 files/batch, 100 MiB total/batch. No extracted-token cap per file and no fixed maximum selected versions for chat/comparison. Evidence-token tuning is deferred; provider context/input limits still apply explicitly. |
@@ -183,6 +183,12 @@ At message admission, copy the session's selected version IDs and active index f
 Keep full history in PostgreSQL and select recent context within the actual model window. If older context is excluded, expose that fact rather than silently treating an unresolved reference as understood. A later measured tuning pass may introduce evidence/history budgets; the removed arbitrary caps are not restored as hidden constants.
 
 ### Structured answer and retries
+
+Centralize all system prompt templates and summary targets in `llm/prompts.py`; keep task-specific generation and embedding settings in `llm/config.py`. Rewriting, chat, summaries and comparisons independently select model, context capacity, output reservation and optional temperature. Preserve existing chat environment variables; use task-prefixed overrides for the other operations. Analysis batching follows its own task capacity. Defaults are initial task choices, not an evaluated best-model claim.
+
+Keep response contracts in `llm/types.py`. Pass Pydantic models to the installed OpenAI SDK's Chat Completions `parse`/`stream` helpers through OpenRouter; let the SDK generate strict JSON schemas and validate completed outputs. Require supporting provider parameters. Use Pydantic's native partial JSON parsing for provisional unfinished response strings instead of maintaining a custom JSON decoder. Reject refusals, incomplete streams and invalid output; retain available usage on failure. Validate source IDs and citation requirements separately from response shape.
+
+Answer reuse includes both chat/rewrite settings, prompts and schemas. Artifact reuse includes its summary/comparison settings, prompt, schema and customization. Persist the generation fingerprint with queued artifacts and refuse execution under a changed configuration; historical completed artifacts remain available. Store generation metadata with new analysis outputs. No provider key is part of these identities.
 
 The model result is a Pydantic `Answer` with `response: str`, `suggestions: list[str]` of at most three items, `citation_ids: list[str]`, and `outcome: answered|insufficient_evidence|clarification_needed`. The response uses server-issued citation markers for factual claims. The frontend receives a `Message` with `content` mapped from `Answer.response`, plus `suggestions`, resolved `citations`, and `outcome`; the server also records its message ID, turn version snapshot, status, and usage. `citation_ids` remain part of the internal structured LLM result rather than replacing resolved source objects in the UI. Suggestions come from the same structured generation, and may be empty when no useful follow-up exists.
 

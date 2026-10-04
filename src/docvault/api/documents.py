@@ -1,5 +1,5 @@
 import json
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Header, Query, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -18,6 +18,7 @@ from docvault.documents import (
 )
 from docvault.errors import AppError
 from docvault.limits import enforce_request_rate_limit
+from docvault.llm.prompts import build_generation_identity
 from docvault.models import Artifact, Batch, Chunk, Document, Idempotency, Job, Version, now
 from docvault.retrieval import build_public_citation, create_cited_evidence_record
 from docvault.schemas import ComparisonCreate, SummaryCreate
@@ -292,16 +293,20 @@ def get_chunk_citation(version_id: str, chunk_id: str):
         return build_public_citation(create_cited_evidence_record(chunk, v))
 
 
-def get_or_create_artifact_job(kind: str, version_ids: list[str], options: dict):
+def get_or_create_artifact_job(
+    kind: Literal["summary", "comparison"], version_ids: list[str], options: dict
+):
     """Reuse or queue an artifact for ready sources, restarting previously failed results."""
     version_ids = list(dict.fromkeys(version_ids))
     if kind == "comparison" and len(version_ids) < 2:
         raise AppError(
             422, "comparison_sources", "Choose at least two distinct versions to compare."
         )
+    generation_identity = build_generation_identity(get_settings().generation_model(kind), kind)
     fingerprint = calculate_json_fingerprint(
-        ["artifact-v1", kind, version_ids, options, get_settings().openrouter_chat_model]
+        ["artifact-v2", kind, version_ids, options, generation_identity]
     )
+    options = {**options, "generation_fingerprint": calculate_json_fingerprint(generation_identity)}
     with session() as db, db.begin():
         require_versions(db, version_ids)
         acquire_upload_advisory_lock(db, f"artifact:{fingerprint}")

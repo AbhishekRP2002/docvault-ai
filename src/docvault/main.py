@@ -130,6 +130,10 @@ def get_public_configuration():
         configured=bool(settings.openrouter_api_key.get_secret_value()),
         chat_model=settings.openrouter_chat_model,
         embedding_model=settings.openrouter_embedding_model,
+        task_models={
+            task: settings.generation_model(task).model
+            for task in ("chat", "rewrite", "summary", "comparison")
+        },
     )
 
 

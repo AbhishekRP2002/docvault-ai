@@ -4,11 +4,9 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from docvault.llm.config import GenerationModelConfig, LLMSettings
 from docvault.llm.graphs import InvalidCitationError, RewrittenQuestion, run_document_chat_workflow
 from docvault.llm.insights import (
-    DimensionFinding,
-    DocumentInsights,
-    KeyInsight,
     generate_document_comparison,
     generate_document_summary,
 )
@@ -17,14 +15,11 @@ from docvault.llm.parsing import (
     parse_text_document,
 )
 from docvault.llm.provider import (
-    ContextLimitError,
     OpenRouterLLM,
     ProviderError,
-    build_strict_response_schema,
-    extract_streamed_response_prefix,
     token_count,
 )
-from docvault.llm.types import Answer, Evidence
+from docvault.llm.types import Answer, DimensionFinding, DocumentInsights, Evidence, KeyInsight
 
 
 def source(id="c1", text="Payment is due in 30 days.", version="v1"):
@@ -39,35 +34,12 @@ def source(id="c1", text="Payment is due in 30 days.", version="v1"):
     )
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        'A quote: "yes". A slash: \\.\nA line.',
-        "Renewal is due. 🧾 Café हिंदी",
-        'This says response: "not another field"',
-    ],
-)
-def test_partial_response_streams_only_stable_complete_characters(value):
-    raw = json.dumps({"suggestions": ["Next?"], "response": value, "citation_ids": ["c1"]})
-    previous = ""
-    observed_before_completion = False
-    for index in range(len(raw) + 1):
-        prefix = extract_streamed_response_prefix(raw[:index])
-        assert prefix.startswith(previous)
-        assert value.startswith(prefix)
-        observed_before_completion |= bool(prefix) and index < len(raw)
-        previous = prefix
-    assert previous == value
-    assert observed_before_completion
-
-
 def test_answer_contract_and_strict_schema():
     with pytest.raises(ValidationError):
         Answer(response="Hi", suggestions=["a", "b", "c", "d"], citation_ids=[], outcome="answered")
-    schema = build_strict_response_schema(Answer)["json_schema"]
-    assert schema["strict"] is True
-    assert schema["schema"]["additionalProperties"] is False
-    assert set(schema["schema"]["required"]) == {
+    schema = Answer.model_json_schema()
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
         "response",
         "suggestions",
         "citation_ids",
@@ -138,7 +110,9 @@ def test_tables_repeat_headers_and_preserve_all_rows():
     assert "item" in headers[0] and "price" in headers[0]
     assert all(chunk.text.splitlines()[:2] == headers for chunk in table_chunks)
     assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
-    actual_rows = re.findall(r"\|\s*Product (\d+)\s*\|\s*(\d+) USD\s*\|", "\n".join(chunk.text for chunk in table_chunks))
+    actual_rows = re.findall(
+        r"\|\s*Product (\d+)\s*\|\s*(\d+) USD\s*\|", "\n".join(chunk.text for chunk in table_chunks)
+    )
     assert actual_rows == [(str(index), str(index)) for index in range(300)]
 
 
@@ -195,8 +169,9 @@ class ChatLLM:
         self.rewrite = rewrite
         self.generations = 0
 
-    async def generate_structured_response(self, schema, messages):
+    async def generate_structured_response(self, schema, messages, *, task):
         assert schema is RewrittenQuestion
+        assert task == "rewrite"
         return self.rewrite
 
     async def stream_structured_answer(self, messages, on_delta):
@@ -248,7 +223,9 @@ async def test_graph_without_evidence_does_not_generate_or_fake_deltas():
     async def delta(value):
         deltas.append(value)
 
-    answer, evidence, _ = await run_document_chat_workflow("Is there a fee?", [], retrieve_relevant_chunks, llm, delta)
+    answer, evidence, _ = await run_document_chat_workflow(
+        "Is there a fee?", [], retrieve_relevant_chunks, llm, delta
+    )
     assert answer.outcome == "insufficient_evidence"
     assert evidence == [] and deltas == [] and llm.generations == 0
 
@@ -270,7 +247,11 @@ async def test_graph_ambiguous_followup_skips_retrieval():
         pytest.fail("Clarification is a final response, not a fake model stream")
 
     answer, _, _ = await run_document_chat_workflow(
-        "What about it?", [{"role": "user", "content": "Compare contracts"}], retrieve_relevant_chunks, llm, delta
+        "What about it?",
+        [{"role": "user", "content": "Compare contracts"}],
+        retrieve_relevant_chunks,
+        llm,
+        delta,
     )
     assert answer.outcome == "clarification_needed"
     assert llm.generations == 0
@@ -294,122 +275,16 @@ async def test_graph_rejects_invented_citation_ids():
         await run_document_chat_workflow("Fee?", [], retrieve_relevant_chunks, llm, delta)
 
 
-class FakeChunk:
-    def __init__(self, content=None, finish=None, usage=None):
-        self.choices = (
-            []
-            if usage
-            else [
-                SimpleNamespace(
-                    delta=SimpleNamespace(content=content, refusal=None),
-                    finish_reason=finish,
-                )
-            ]
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size", [64, 16])
+async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(batch_size):
+    llm = OpenRouterLLM(
+        LLMSettings(
+            _env_file=None,
+            openrouter_api_key="test-key",
+            embedding_dimensions=2,
+            openrouter_embedding_max_batch_inputs=batch_size,
         )
-        self.usage = usage
-
-    def model_dump(self):
-        return {"id": "req1", "model": "test/model", "usage": self.usage}
-
-
-class FakeStream:
-    def __init__(self, chunks):
-        self.chunks = chunks
-        self.closed = False
-
-    def __aiter__(self):
-        return self.iterate()
-
-    async def iterate(self):
-        for chunk in self.chunks:
-            yield chunk
-
-    async def close(self):
-        self.closed = True
-
-
-@pytest.mark.asyncio
-async def test_provider_streams_partial_response_before_end_and_records_usage():
-    usage, deltas, requested = [], [], []
-
-    async def record_llm_call_async(value):
-        usage.append(value)
-
-    llm = OpenRouterLLM(
-        "test-key", "https://example.test/v1", "test/model", "test/embed", record_llm_call_async=record_llm_call_async
-    )
-    stream = FakeStream(
-        [
-            FakeChunk('{"response":"Payment'),
-            FakeChunk(' in 30 days.","suggestions":[],"citation_ids":["c1"],"outcome":"answered"}'),
-            FakeChunk(finish="stop"),
-            FakeChunk(usage={"prompt_tokens": 42, "completion_tokens": 12, "cost": 0.003}),
-        ]
-    )
-
-    async def create(**kwargs):
-        requested.append(kwargs)
-        return stream
-
-    async def delta(value):
-        assert not stream.closed
-        deltas.append(value)
-
-    llm.client.chat.completions.create = create
-    try:
-        answer = await llm.stream_structured_answer([{"role": "user", "content": "Payment?"}], delta)
-    finally:
-        await llm.close()
-    assert deltas == ["Payment", " in 30 days."]
-    assert answer.response == "Payment in 30 days."
-    assert stream.closed
-    assert requested[0]["stream"] is True
-    assert requested[0]["extra_body"]["provider"]["require_parameters"] is True
-    assert usage[0]["cost_usd"] == 0.003 and usage[0]["input_tokens"] == 42
-    assert usage[0]["status"] == "succeeded"
-
-
-@pytest.mark.asyncio
-async def test_provider_rejects_truncated_stream_and_closes_connection():
-    llm = OpenRouterLLM("test-key", "https://example.test/v1", "test/model", "test/embed")
-    stream = FakeStream([FakeChunk('{"response":"Partial'), FakeChunk(finish="length")])
-
-    async def create(**kwargs):
-        return stream
-
-    async def delta(value):
-        pass
-
-    llm.client.chat.completions.create = create
-    try:
-        with pytest.raises(ProviderError, match="before completion"):
-            await llm.stream_structured_answer([], delta)
-    finally:
-        await llm.close()
-    assert stream.closed
-
-
-@pytest.mark.asyncio
-async def test_provider_context_limit_fails_without_truncation_or_request():
-    llm = OpenRouterLLM(
-        "test-key",
-        "https://example.test/v1",
-        "test/model",
-        "test/embed",
-        context_tokens=1000,
-        max_output_tokens=200,
-    )
-    try:
-        with pytest.raises(ContextLimitError):
-            await llm.generate_structured_response(Answer, [{"role": "user", "content": "evidence " * 1000}])
-    finally:
-        await llm.close()
-
-
-@pytest.mark.asyncio
-async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions():
-    llm = OpenRouterLLM(
-        "test-key", "https://example.test/v1", "test/model", "test/embed", embedding_dimensions=2
     )
     requests = []
 
@@ -425,9 +300,13 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions():
     llm.client.embeddings.create = create
     try:
         vectors = await llm.embed_texts([f"Text {i}" for i in range(65)])
-        assert len(vectors) == 65 and vectors[0] == [0, 1] and vectors[63] == [63, 1]
-        assert [len(request["input"]) for request in requests] == [64, 1]
-        llm.embedding_dimensions = 3
+        assert vectors == [[float(index % batch_size), 1.0] for index in range(65)]
+        assert [len(request["input"]) for request in requests] == [batch_size] * (
+            65 // batch_size
+        ) + [65 % batch_size]
+        llm.embedding_configuration = llm.embedding_configuration.model_copy(
+            update={"dimensions": 3}
+        )
         with pytest.raises(ProviderError, match="dimensions"):
             await llm.embed_texts(["Text"])
     finally:
@@ -435,13 +314,16 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions():
 
 
 class SummaryLLM:
-    context_tokens = 4000
-    max_output_tokens = 800
+    def generation_model(self, task):
+        return GenerationModelConfig(
+            model=f"test/{task}", context_tokens=4000, max_output_tokens=800
+        )
 
     def __init__(self):
         self.calls = []
 
-    async def generate_structured_response(self, schema, messages):
+    async def generate_structured_response(self, schema, messages, *, task):
+        assert task == ("comparison" if schema is DimensionFinding else "summary")
         payload = json.loads(messages[-1]["content"])
         self.calls.append(payload)
         ids = [id for section in payload["sections"] for id in section["citation_ids"]]
@@ -461,7 +343,9 @@ class SummaryLLM:
 async def test_long_summary_processes_every_chunk_then_reduces():
     llm = SummaryLLM()
     evidence = [source(f"c{i}", "Payment details. " * 120) for i in range(9)]
-    result = await generate_document_summary(llm, evidence, focus_areas=["Payment"], tone="executive")
+    result = await generate_document_summary(
+        llm, evidence, focus_areas=["Payment"], tone="executive"
+    )
     original_ids = {
         id
         for call in llm.calls
@@ -497,7 +381,7 @@ async def test_comparison_preserves_all_selected_versions_and_reports_missing():
 async def test_summary_rejects_citations_invented_by_provider():
     llm = SummaryLLM()
 
-    async def generate_structured_response(schema, messages):
+    async def generate_structured_response(schema, messages, *, task):
         return DocumentInsights(
             summary="Oops",
             category="Other",

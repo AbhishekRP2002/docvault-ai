@@ -21,6 +21,7 @@ from docvault.integrations import create_llm_client
 from docvault.jobs import SourceDeleted, job_checkpoint
 from docvault.llm.insights import generate_document_comparison, generate_document_summary
 from docvault.llm.parsing import parse_document_file
+from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import token_count
 from docvault.llm.types import Evidence, ParsedDocument
 from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, Version, now
@@ -289,6 +290,7 @@ async def _embed_missing_chunks(job_id: str, token: int, version_id: str) -> Non
         return
     llm = create_llm_client(version_id)
     try:
+        configuration = get_settings().embedding_model()
         batch, size = [], 0
 
         async def embed_and_persist_batch(items):
@@ -303,7 +305,10 @@ async def _embed_missing_chunks(job_id: str, token: int, version_id: str) -> Non
 
         for item in missing:
             item_size = token_count(item[1])
-            if batch and (len(batch) == 64 or size + item_size > 32_000):
+            if batch and (
+                len(batch) == configuration.max_batch_inputs
+                or size + item_size > configuration.max_batch_tokens
+            ):
                 await embed_and_persist_batch(batch)
                 batch, size = [], 0
             batch.append(item)
@@ -370,6 +375,12 @@ async def _create_document_insights(job_id: str, token: int, version_id: str) ->
     llm = create_llm_client(version_id)
     try:
         data = await generate_document_summary(llm, evidence)
+        identity = build_generation_identity(llm.generation_model("summary"), "summary")
+        data["generation"] = {
+            "fingerprint": calculate_json_fingerprint(identity),
+            "task": "summary",
+            "model_config": identity["model_config"],
+        }
     finally:
         await llm.close()
     with session() as db, db.begin():
@@ -394,6 +405,15 @@ async def _generate_requested_artifact(job_id: str, token: int, artifact_id: str
         options, kind = artifact.options, artifact.kind
     llm = create_llm_client(artifact_id)
     try:
+        if kind not in {"summary", "comparison"}:
+            raise ValueError("Unsupported artifact kind.")
+        task = "summary" if kind == "summary" else "comparison"
+        generation_identity = build_generation_identity(llm.generation_model(task), task)
+        if options.get("generation_fingerprint") not in (
+            None,
+            calculate_json_fingerprint(generation_identity),
+        ):
+            raise ValueError("LLM configuration changed after submission; request a new artifact.")
         if kind == "summary":
             if len(evidence) != 1:
                 raise ValueError("A summary artifact requires exactly one document version.")
@@ -404,10 +424,13 @@ async def _generate_requested_artifact(job_id: str, token: int, artifact_id: str
                 focus_areas=options.get("focus_areas"),
                 tone=options.get("tone", "neutral"),
             )
-        elif kind == "comparison":
-            data = await generate_document_comparison(llm, evidence, options.get("dimensions", []))
         else:
-            raise ValueError("Unsupported artifact kind.")
+            data = await generate_document_comparison(llm, evidence, options.get("dimensions", []))
+        data["generation"] = {
+            "fingerprint": calculate_json_fingerprint(generation_identity),
+            "task": task,
+            "model_config": generation_identity["model_config"],
+        }
     finally:
         await llm.close()
     with session() as db, db.begin():

@@ -7,9 +7,18 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 import tiktoken
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    ContentFilterFinishReasonError,
+    LengthFinishReasonError,
+)
 from pydantic import BaseModel
+from pydantic_core import from_json
 
+from docvault.llm.config import GenerationModelConfig, LLMSettings, LLMTask
 from docvault.llm.types import Answer
 
 Schema = TypeVar("Schema", bound=BaseModel)
@@ -33,174 +42,57 @@ def token_count(text: str) -> int:
     return len(tiktoken.get_encoding("cl100k_base").encode(text, disallowed_special=()))
 
 
-def build_strict_response_schema(schema: type[BaseModel]) -> dict:
-    """Derive an OpenRouter strict response format from a Pydantic model's JSON schema."""
-    result = schema.model_json_schema()
-
-    def _normalize_schema_objects(value):
-        """Remove defaults and require declared object fields recursively in the schema copy."""
-        if isinstance(value, dict):
-            value.pop("default", None)
-            if value.get("type") == "object":
-                value["additionalProperties"] = False
-                value["required"] = list(value.get("properties", {}))
-            for child in value.values():
-                _normalize_schema_objects(child)
-        elif isinstance(value, list):
-            for child in value:
-                _normalize_schema_objects(child)
-
-    _normalize_schema_objects(result)
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": schema.__name__,
-            "strict": True,
-            "schema": result,
-        },
-    }
-
-
-def extract_streamed_response_prefix(raw: str) -> str:
-    """Decode the complete characters available in the top-level response string.
-
-    Key order, escaped quotes, incomplete escapes, and UTF-16 surrogate pairs are
-    supported. Other fields are never exposed as answer text. Full JSON and
-    schema validation still happen after the provider stream has ended.
-    """
-    decoder = json.JSONDecoder()
-    offset = 0
-
-    def _skip_json_whitespace(index):
-        """Return the next non-whitespace offset in the current JSON buffer."""
-        while index < len(raw) and raw[index].isspace():
-            index += 1
-        return index
-
-    offset = _skip_json_whitespace(offset)
-    if offset == len(raw) or raw[offset] != "{":
-        return ""
-    offset += 1
-    while offset < len(raw):
-        offset = _skip_json_whitespace(offset)
-        try:
-            key, offset = decoder.raw_decode(raw, offset)
-        except ValueError:
-            return ""
-        offset = _skip_json_whitespace(offset)
-        if offset == len(raw) or raw[offset] != ":":
-            return ""
-        offset = _skip_json_whitespace(offset + 1)
-        if key == "response":
-            if offset == len(raw) or raw[offset] != '"':
-                return ""
-            offset += 1
-            output = []
-            while offset < len(raw):
-                char = raw[offset]
-                if char == '"':
-                    return "".join(output)
-                if char != "\\":
-                    if ord(char) < 32:
-                        return "".join(output)
-                    output.append(char)
-                    offset += 1
-                    continue
-                end = offset + 2
-                if end > len(raw):
-                    break
-                if raw[offset + 1] == "u":
-                    end = offset + 6
-                    if end > len(raw):
-                        break
-                    try:
-                        value = int(raw[offset + 2 : end], 16)
-                    except ValueError:
-                        break
-                    if 0xD800 <= value <= 0xDBFF:
-                        end += 6
-                        if end > len(raw):
-                            break
-                try:
-                    decoded = json.loads('"' + raw[offset:end] + '"')
-                except ValueError:
-                    break
-                if any(0xD800 <= ord(c) <= 0xDFFF for c in decoded):
-                    break
-                output.append(decoded)
-                offset = end
-            return "".join(output)
-        try:
-            _, offset = decoder.raw_decode(raw, offset)
-        except ValueError:
-            return ""
-        offset = _skip_json_whitespace(offset)
-        if offset == len(raw) or raw[offset] != ",":
-            return ""
-        offset += 1
-    return ""
-
-
 class OpenRouterLLM:
-    def __init__(
-        self,
-        api_key: str,
-        base_url: str,
-        chat_model: str,
-        embedding_model: str,
-        embedding_dimensions: int = 1536,
-        record_llm_call_async: UsageCallback | None = None,
-        *,
-        context_tokens: int = 128_000,
-        max_output_tokens: int = 4096,
-    ):
-        """Configure an asynchronous client with explicit model capacities and no SDK retries.
-
-        Reject a missing key or invalid output reservation before any API request.
-        The optional usage callback receives accounting for attempted provider calls.
-        """
-        if not api_key:
+    def __init__(self, settings: LLMSettings, record_llm_call_async: UsageCallback | None = None):
+        """Snapshot each task's validated model configuration and configure an async SDK client."""
+        if not settings.openrouter_api_key.get_secret_value():
             raise ProviderError("Set OPENROUTER_API_KEY to enable LLM operations.")
-        if context_tokens <= max_output_tokens or max_output_tokens < 1:
-            raise ValueError("Model context must exceed the output token reservation.")
+        self.model_configurations = {
+            task: settings.generation_model(task)
+            for task in ("chat", "rewrite", "summary", "comparison")
+        }
+        self.embedding_configuration = settings.embedding_model()
         self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
+            api_key=settings.openrouter_api_key.get_secret_value(),
+            base_url=settings.openrouter_base_url,
             max_retries=0,
             timeout=120.0,
         )
-        self.chat_model = chat_model
-        self.embedding_model = embedding_model
-        self.embedding_dimensions = embedding_dimensions
-        self.context_tokens = context_tokens
-        self.max_output_tokens = max_output_tokens
         self.record_llm_call_async = record_llm_call_async
+
+    def generation_model(self, task: LLMTask) -> GenerationModelConfig:
+        """Return the immutable configuration selected for this client's task."""
+        return self.model_configurations[task]
 
     async def close(self) -> None:
         """Release the underlying asynchronous HTTP client's resources."""
         await self.client.close()
 
-    def _build_generation_parameters(self, schema: type[BaseModel], messages: list[dict]) -> dict:
-        """Build strict-generation parameters and reject estimated model context overflow."""
-        response_format = build_strict_response_schema(schema)
-        # Include schema and a margin for message framing in the context check.
+    def _build_generation_parameters(
+        self, schema: type[BaseModel], messages: list[dict], task: LLMTask
+    ) -> dict:
+        """Select task settings and let the SDK derive the strict schema from the Pydantic model."""
+        configuration = self.generation_model(task)
         estimate = token_count(json.dumps(messages, ensure_ascii=False))
-        estimate += token_count(json.dumps(response_format)) + 128
-        if estimate + self.max_output_tokens > self.context_tokens:
+        estimate += token_count(json.dumps(schema.model_json_schema())) + 128
+        if estimate + configuration.max_output_tokens > configuration.context_tokens:
             raise ContextLimitError(
-                "This request exceeds the configured model context window. "
+                f"This request exceeds the configured {task} model context window. "
                 "Narrow the question or select a model with a larger context."
             )
-        return {
-            "model": self.chat_model,
+        parameters = {
+            "model": configuration.model,
             "messages": messages,
-            "response_format": response_format,
-            "max_tokens": self.max_output_tokens,
+            "response_format": schema,
+            "max_tokens": configuration.max_output_tokens,
             "extra_body": {"provider": {"require_parameters": True}},
         }
+        if configuration.temperature is not None:
+            parameters["temperature"] = configuration.temperature
+        return parameters
 
     async def _record_provider_usage(
-        self, result: dict, operation: str, started: float, status: str
+        self, result: dict, operation: str, started: float, status: str, requested_model: str
     ) -> None:
         """Send normalized provider accounting and elapsed time to the optional async callback.
 
@@ -212,8 +104,7 @@ class OpenRouterLLM:
         details = usage.get("prompt_tokens_details") or {}
         await self.record_llm_call_async(
             {
-                "model": result.get("model")
-                or (self.embedding_model if operation == "embedding" else self.chat_model),
+                "model": result.get("model") or requested_model,
                 "operation": operation,
                 "input_tokens": usage.get("prompt_tokens"),
                 "output_tokens": usage.get(
@@ -240,88 +131,141 @@ class OpenRouterLLM:
         return ProviderError("The LLM provider returned an invalid response.")
 
     async def generate_structured_response(
-        self, schema: type[Schema], messages: list[dict]
+        self, schema: type[Schema], messages: list[dict], *, task: LLMTask
     ) -> Schema:
-        """Request one schema-constrained completion and return the validated model instance.
+        """Return the SDK-parsed Pydantic result, rejecting refusals or incomplete output.
 
-        Report usage even on failure; refusals, incomplete output, provider errors,
-        and schema validation failures propagate to the caller.
+        OpenRouter receives the SDK-generated strict JSON schema. Usage is recorded
+        for the selected task model even when parsing or provider requests fail.
         """
-        parameters = self._build_generation_parameters(schema, messages)
+        parameters = self._build_generation_parameters(schema, messages, task)
         started, result, status = time.monotonic(), {}, "failed"
         try:
-            completion = await self.client.chat.completions.create(**parameters)
-            result = completion.model_dump()
+            response = await self.client.chat.completions.with_raw_response.parse(**parameters)
+            # Capture provider accounting before SDK validation can reject the model content.
+            result = response.http_response.json()
+            completion = response.parse()
+            if not completion.choices:
+                raise ProviderError("The LLM provider returned no completion.")
             choice = completion.choices[0]
-            if choice.finish_reason != "stop" or choice.message.refusal:
+            if (
+                choice.finish_reason != "stop"
+                or choice.message.refusal
+                or choice.message.parsed is None
+            ):
                 raise ProviderError("The LLM provider did not complete a structured answer.")
-            value = schema.model_validate_json(choice.message.content or "")
             status = "succeeded"
-            return value
+            return choice.message.parsed
+        except LengthFinishReasonError as exc:
+            result = exc.completion.model_dump(exclude={"choices"})
+            raise ProviderError(
+                "The LLM response ended before completion; retry the request."
+            ) from exc
+        except ContentFilterFinishReasonError as exc:
+            raise ProviderError("The LLM provider declined this request.") from exc
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
             raise self._translate_provider_error(exc) from exc
+        except ValueError as exc:
+            raise ProviderError(
+                "The LLM provider returned an invalid structured response."
+            ) from exc
         finally:
-            await self._record_provider_usage(result, "generation", started, status)
+            await self._record_provider_usage(
+                result, "generation", started, status, parameters["model"]
+            )
 
     async def stream_structured_answer(
         self, messages: list[dict], on_delta: DeltaCallback
     ) -> Answer:
-        """Emit provisional response-field deltas and return the fully validated answer.
+        """Stream provisional answer text with Pydantic's partial JSON parser and validate via SDK.
 
-        Reject refusals, truncated streams, and inconsistent text. Close the
-        provider stream and report available usage on completion or failure.
+        The SDK owns schema conversion, accumulation, final validation and stream
+        cleanup. Native partial parsing exposes unfinished response strings so the
+        UI receives real text deltas before the full JSON object is complete.
         """
-        parameters = self._build_generation_parameters(Answer, messages)
+        parameters = self._build_generation_parameters(Answer, messages, "chat")
         started, result, status = time.monotonic(), {}, "failed"
-        raw, emitted, finish_reason = "", "", None
-        stream = None
+        emitted, stream = "", None
         try:
-            stream = await self.client.chat.completions.create(**parameters, stream=True)
-            async for chunk in stream:
-                data = chunk.model_dump()
-                result["id"] = data.get("id") or result.get("id")
-                result["model"] = data.get("model") or result.get("model")
-                if data.get("usage"):
-                    result["usage"] = data["usage"]
-                for choice in chunk.choices:
-                    if choice.delta.refusal:
+            async with self.client.chat.completions.stream(
+                **parameters, stream_options={"include_usage": True}
+            ) as stream:
+                async for event in stream:
+                    if event.type == "chunk":
+                        result = event.snapshot.model_dump(exclude={"choices"})
+                    elif event.type == "refusal.delta":
                         raise ProviderError("The LLM provider declined this request.")
-                    finish_reason = choice.finish_reason or finish_reason
-                    raw += choice.delta.content or ""
-                    prefix = extract_streamed_response_prefix(raw)
-                    if not prefix.startswith(emitted):
-                        raise ProviderError("The LLM provider returned inconsistent JSON text.")
-                    if len(prefix) > len(emitted):
-                        await on_delta(prefix[len(emitted) :])
-                        emitted = prefix
-            if finish_reason != "stop":
-                raise ProviderError("The LLM response ended before completion; retry the message.")
-            answer = Answer.model_validate_json(raw)
-            if emitted != answer.response:
-                raise ProviderError("The LLM provider returned inconsistent answer content.")
-            status = "succeeded"
-            return answer
+                    elif event.type == "content.delta":
+                        try:
+                            partial = from_json(event.snapshot, allow_partial="trailing-strings")
+                        except ValueError:
+                            # A JSON key/escape may still be incomplete; final SDK validation is mandatory.
+                            continue
+                        prefix = partial.get("response", "") if isinstance(partial, dict) else ""
+                        if not isinstance(prefix, str) or not prefix.startswith(emitted):
+                            raise ProviderError(
+                                "The LLM provider returned inconsistent answer content."
+                            )
+                        if len(prefix) > len(emitted):
+                            await on_delta(prefix[len(emitted) :])
+                            emitted = prefix
+                if not result:
+                    raise ProviderError("The LLM provider returned no completion.")
+                completion = await stream.get_final_completion()
+                result = completion.model_dump(exclude={"choices"})
+                if not completion.choices:
+                    raise ProviderError("The LLM provider returned no completion.")
+                choice = completion.choices[0]
+                answer = choice.message.parsed
+                if choice.finish_reason != "stop" or choice.message.refusal or answer is None:
+                    raise ProviderError(
+                        "The LLM response ended before completion; retry the message."
+                    )
+                if emitted != answer.response:
+                    raise ProviderError("The LLM provider returned inconsistent answer content.")
+                status = "succeeded"
+                return answer
+        except LengthFinishReasonError as exc:
+            result = exc.completion.model_dump(exclude={"choices"})
+            raise ProviderError(
+                "The LLM response ended before completion; retry the message."
+            ) from exc
+        except ContentFilterFinishReasonError as exc:
+            raise ProviderError("The LLM provider declined this request.") from exc
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
             raise self._translate_provider_error(exc) from exc
+        except ValueError as exc:
+            raise ProviderError(
+                "The LLM provider returned an invalid structured response."
+            ) from exc
         finally:
-            if stream is not None:
-                await stream.close()
-            await self._record_provider_usage(result, "generation", started, status)
+            if stream is not None and result:
+                result = stream.current_completion_snapshot.model_dump(exclude={"choices"})
+            await self._record_provider_usage(
+                result, "generation", started, status, parameters["model"]
+            )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed ordered inputs in batches of at most 64 texts and 32,000 estimated tokens.
+        """Embed ordered inputs using the embedding task's configured batch/token capacities.
 
         Reject blank or oversized inputs and invalid response indices, dimensions,
         or nonfinite vector values. Record provider usage separately for each batch.
         """
+        configuration = self.embedding_configuration
         if not texts:
             return []
         batches, batch, batch_tokens = [], [], 0
         for value in texts:
             size = token_count(value)
-            if not value.strip() or size > 8191:
-                raise ContextLimitError("An embedding input is empty or exceeds 8,191 tokens.")
-            if batch and (len(batch) == 64 or batch_tokens + size > 32_000):
+            capacity = min(configuration.max_input_tokens, configuration.max_batch_tokens)
+            if not value.strip() or size > capacity:
+                raise ContextLimitError(
+                    f"An embedding input is empty or exceeds {capacity:,} tokens."
+                )
+            if batch and (
+                len(batch) == configuration.max_batch_inputs
+                or batch_tokens + size > configuration.max_batch_tokens
+            ):
                 batches.append(batch)
                 batch, batch_tokens = [], 0
             batch.append(value)
@@ -333,9 +277,9 @@ class OpenRouterLLM:
             started, result, status = time.monotonic(), {}, "failed"
             try:
                 completion = await self.client.embeddings.create(
-                    model=self.embedding_model,
+                    model=configuration.model,
                     input=batch,
-                    dimensions=self.embedding_dimensions,
+                    dimensions=configuration.dimensions,
                     encoding_format="float",
                     extra_body={"provider": {"require_parameters": True}},
                 )
@@ -344,7 +288,7 @@ class OpenRouterLLM:
                 if [item.index for item in entries] != list(range(len(batch))):
                     raise ProviderError("The embedding provider returned incomplete inputs.")
                 for item in entries:
-                    if len(item.embedding) != self.embedding_dimensions or not all(
+                    if len(item.embedding) != configuration.dimensions or not all(
                         math.isfinite(value) for value in item.embedding
                     ):
                         raise ProviderError(
@@ -355,5 +299,7 @@ class OpenRouterLLM:
             except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
                 raise self._translate_provider_error(exc) from exc
             finally:
-                await self._record_provider_usage(result, "embedding", started, status)
+                await self._record_provider_usage(
+                    result, "embedding", started, status, configuration.model
+                )
         return vectors

@@ -54,6 +54,9 @@ class MemoryRedis:
 
 
 class FakeLLM:
+    def generation_model(self, task):
+        return get_settings().generation_model(task)
+
     def __init__(self):
         self.calls = []
         self.block = False
@@ -63,7 +66,7 @@ class FakeLLM:
     async def embed_texts(self, inputs):
         return [[1.0] + [0.0] * 1535 for _ in inputs]
 
-    async def generate_structured_response(self, schema, messages):
+    async def generate_structured_response(self, schema, messages, *, task):
         payload = json.loads(messages[-1]["content"])
         return schema(question=payload["question"], needs_clarification=False, clarification="")
 
@@ -379,7 +382,10 @@ def test_cited_chat_and_idempotency_read_back_persisted_history(api):
     assert history[-1] == message
     assert api.client.get(f"/v1/chats/{chat}/messages/{message['id']}").json() == message
     build_public_citation = api.client.get(f"/v1/versions/{source.version}/chunks/{source.chunk}")
-    assert build_public_citation.status_code == 200 and build_public_citation.json()["quote"] == source.text
+    assert (
+        build_public_citation.status_code == 200
+        and build_public_citation.json()["quote"] == source.text
+    )
 
 
 def test_sse_contains_real_deltas_then_the_persisted_frontend_message(api):
@@ -634,3 +640,26 @@ def test_llm_client_usage_is_persisted_and_read_by_usage_metrics(api):
         "unknown_cost_calls": 0,
         "cache_hits": 0,
     }
+
+
+def test_artifact_reuse_tracks_only_the_selected_task_configuration(api, monkeypatch):
+    version = ready_source().version
+    endpoint = f"/v1/versions/{version}/summaries"
+    first = api.client.post(endpoint, json={})
+    assert first.status_code == 202, first.text
+    repeated = api.client.post(endpoint, json={})
+    assert repeated.status_code == 202 and repeated.json()["id"] == first.json()["id"]
+    monkeypatch.setattr(get_settings(), "openrouter_chat_model", "test/different-chat")
+    assert api.client.post(endpoint, json={}).json()["id"] == first.json()["id"]
+    monkeypatch.setattr(get_settings(), "openrouter_summary_model", "test/different-summary")
+    changed = api.client.post(endpoint, json={})
+    assert changed.status_code == 202 and changed.json()["id"] != first.json()["id"]
+    with session() as db:
+        from docvault.models import Artifact
+
+        artifacts = list(db.scalars(select(Artifact)))
+        assert len(artifacts) == 2
+        assert (
+            artifacts[0].options["generation_fingerprint"]
+            != artifacts[1].options["generation_fingerprint"]
+        )

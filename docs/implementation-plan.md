@@ -13,8 +13,8 @@ The feature-by-feature implementation ledger is [progress.md](progress.md). It i
 | Workstream | Status | Evidence / remaining gate |
 |---|---|---|
 | Specification and research | Implemented | Approved LangGraph/RQ/OpenRouter decisions and all 18 bonuses retained. UI contract updated to the user's two-column reference. |
-| M0 provider/parser feasibility | Partially verified | Earlier real embedding/structured-stream smoke; final native Docling checks confirm DOCX, four-page PDF (25 chunks) and image-only OCR content in chunks. Full corpus/resource benchmarks pending. |
-| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; Previous full suite: 72 backend tests passed, including real HNSW checks. Latest relevant regression suite: 63 passed, including generated migration and nullable upload checks; scoped document/generation-hook Pyright passes. All 177 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
+| M0 provider/parser feasibility | Partially verified | Latest real task-model smoke: rewrite/chat/summary/comparison and 1536-dimensional embeddings pass; final native Docling checks confirm DOCX, four-page PDF (25 chunks) and image-only OCR content in chunks. Full corpus/resource benchmarks pending. |
+| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; Previous full suite: 72 backend tests passed, including real HNSW checks. Latest relevant regression suite: 109 passed with the unchanged large ANN benchmark deselected. LLM/configuration/processing/artifact scoped Pyright passes. All 179 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
 | M4 insights/customization | Implemented; partially verified | Structured analysis and summary artifact code plus deterministic tests. Live coverage/long-document review pending. |
 | M5 comparison/cache/quotas | Partially implemented | Comparison, scoped caches and reuse implemented. Daily budget reservations and full quota gates pending; DAILY_BUDGET_USD currently has no enforcement. |
 | M6 frontend | Implemented; browser validation pending | Two-column SaaS shell, Files, Usage, Agent/New Run/Past Runs. assistant-ui External Store Runtime integrates the Python SSE/history with thread/composer primitives, scroll-to-bottom, Radix icon tooltips and streaming MarkdownText. Typecheck/build and 32 transport/runtime/rendering tests pass. User chose manual browser validation. |
@@ -22,6 +22,8 @@ The feature-by-feature implementation ledger is [progress.md](progress.md). It i
 | M7 evaluation/submission | Pending | Frozen evaluation corpus/results, performance benchmark, clean Compose reproduction and demo recording/walkthrough remain; AI_USAGE.md now records actual assistance. |
 
 Owned backend code uses `docvault.llm`, `OpenRouterLLM`, `LLMCall` and descriptive action names such as `retrieve_relevant_chunks`, `build_public_citation`, `_embed_missing_chunks` and `_create_document_insights`. Update imports, callbacks, scripts and tests together; retain stable API routes and JSON fields. Keep external provider names/URLs and the assignment-required `AI_USAGE.md` intact.
+
+LLM task settings and prompts are separate from workflows in `llm/config.py` and `llm/prompts.py`; response models live in `llm/types.py`. Route rewrite/chat/summary/comparison independently, use each task's context/output capacities for admission and map/reduce batching, and preserve chat environment variable compatibility. The SDK owns strict schema generation and final Pydantic parsing; native partial JSON parsing preserves real text streaming. Cache fingerprints include the corresponding model settings, prompt and schema. Verify queued artifact fingerprints before provider work and retain generation metadata with new analysis results. SDK/Pydantic HTTP/SSE fixtures cover validation, Unicode/escape boundaries, refusals, truncation, cancellation and usage; real task-model smoke is separate evidence. Existing completed insights are not silently regenerated.
 
 Record actual commands and evidence in [progress.md](progress.md). Passing deterministic provider tests verifies application behavior, not model quality. No entire milestone or bonus is complete solely because its code exists.
 
@@ -60,7 +62,9 @@ src/docvault/
   processing.py           # stage functions and checkpoints
   llm/
     parsing.py            # Docling conversion, HybridChunker, provenance adapter
-    provider.py           # OpenRouterLLM, structured responses/embeddings/usage
+    config.py             # task models, capacities, environment overrides
+    prompts.py            # system templates, summary targets, generation identities
+    provider.py           # SDK Pydantic parse/stream, embeddings and usage
     graphs.py             # grounded chat graph
     insights.py           # summaries and comparisons
     types.py              # structured response/evidence contracts
@@ -75,7 +79,6 @@ src/docvault/
   cache.py                # explicit keys and Redis operations
   limits.py               # rate, resource, and budget admission
   telemetry.py            # structured logging and metrics
-  prompts/                # versioned chat/rewrite/insight/comparison templates
 tests/
   unit/
   integration/
@@ -107,7 +110,7 @@ This is a responsibility map, not a requirement to create empty files up front. 
 - Confirm Python/container compatibility and pin the initial package set. Choose a Docling-supported Python version; proposed baseline is Python 3.12, subject to package resolution.
 - Create redistributable clean/scanned/mixed/two-column/table PDF, DOCX, and TXT fixtures with known source locations. Add negative files and prompt-injection text. Prepare 12-15 documents, a separate tuning set, and at least 40 held-out questions meeting the spec's answerable/unanswerable split.
 - Measure Docling CPU time, peak RAM, first-use downloads, OCR inclusion, and provenance. Compare a lightweight parser on clean PDFs as a control. Record the installed version/options and limitations.
-- Validate the configured OpenRouter account with `openai/gpt-4.1-mini` and `openai/text-embedding-3-small` through the OpenAI SDK at `https://openrouter.ai/api/v1`. Check embedding dimensionality, schema support, provider usage, actual incremental response text, cancellation, and context-overflow behavior. The user reports `.env` is ready; never print or commit the key. Documentation availability is not a live smoke pass.
+- Validate the configured OpenRouter account with each task-selected generation model and `openai/text-embedding-3-small` through the OpenAI SDK at `https://openrouter.ai/api/v1`. Check embedding dimensionality, schema support, provider usage, actual incremental response text, cancellation, and context-overflow behavior. The user reports `.env` is ready; never print or commit the key. Documentation availability is not a live smoke pass.
 - Resolve the structured `Answer {response, suggestions, citation_ids, outcome}` plus streaming contract; enforce at most three suggestions. Define golden examples for successful answers, abstention, clarification, insights, and comparisons. Require supporting OpenRouter routing parameters where needed.
 - Compile bounded LangGraph ingestion/chat/analysis workflows and make their functions testable independently. Keep SQL-owned history/jobs/checkpoints and RQ dispatch; do not add a second LangGraph persistence authority initially. Record the resolved dependency versions before relying on unfamiliar APIs.
 

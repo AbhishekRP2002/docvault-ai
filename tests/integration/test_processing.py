@@ -17,9 +17,9 @@ from sqlalchemy import create_engine, func, select, text
 
 from docvault import cache, config, jobs, processing
 from docvault import db as database
-from docvault.llm.insights import DocumentInsights, KeyInsight
+from docvault.llm.config import GenerationModelConfig
 from docvault.llm.provider import ProviderError
-from docvault.llm.types import ParsedChunk, ParsedDocument
+from docvault.llm.types import DocumentInsights, KeyInsight, ParsedChunk, ParsedDocument
 from docvault.models import Artifact, Chat, Chunk, Document, Job, JobAttempt, Message, Version, now
 
 pytestmark = [
@@ -91,8 +91,10 @@ def seed_version(content="Payment is due in 30 days.", document_id=None, number=
 
 
 class FakeLLM:
-    context_tokens = 128000
-    max_output_tokens = 4096
+    def generation_model(self, task):
+        return GenerationModelConfig(
+            model=f"test/{task}", context_tokens=128000, max_output_tokens=4096
+        )
 
     def __init__(self, fail_call=None):
         self.batches = []
@@ -105,7 +107,7 @@ class FakeLLM:
             raise ProviderError("Temporary provider failure.", retryable=True)
         return [[1.0] + [0.0] * 1535 for _ in texts]
 
-    async def generate_structured_response(self, schema, messages):
+    async def generate_structured_response(self, schema, messages, *, task):
         import json
 
         self.generations += 1
@@ -164,13 +166,24 @@ def test_missing_artifact_is_rejected_before_provider_work(isolated_db, monkeypa
         asyncio.run(processing._generate_requested_artifact(str(uuid4()), 1, str(uuid4())))
 
 
-def test_summary_artifact_persists_after_guarded_lookups(isolated_db, monkeypatch):
+@pytest.mark.parametrize("with_generation_fingerprint", [False, True])
+def test_summary_artifact_persists_after_guarded_lookups(
+    isolated_db, monkeypatch, with_generation_fingerprint
+):
     llm = FakeLLM()
     monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     _, version_id, ingest_job_id = seed_version()
     jobs.run_job(ingest_job_id)
     with database.session() as db, db.begin():
-        artifact = Artifact(kind="summary", signature=uuid4().hex, version_ids=[version_id])
+        identity = processing.build_generation_identity(llm.generation_model("summary"), "summary")
+        options = (
+            {"generation_fingerprint": cache.calculate_json_fingerprint(identity)}
+            if with_generation_fingerprint
+            else {}
+        )
+        artifact = Artifact(
+            kind="summary", signature=uuid4().hex, version_ids=[version_id], options=options
+        )
         db.add(artifact)
         db.flush()
         job = Job(kind="summary", resource_id=artifact.id)
@@ -183,6 +196,10 @@ def test_summary_artifact_persists_after_guarded_lookups(isolated_db, monkeypatc
         assert artifact is not None and artifact.status == "ready"
         assert artifact.data is not None
         assert artifact.data["summary"] == "Payment is due in 30 days."
+        assert artifact.data["generation"]["fingerprint"] == cache.calculate_json_fingerprint(
+            identity
+        )
+        assert artifact.data["generation"]["model_config"]["model"] == "test/summary"
         job = db.get(Job, job_id)
         assert job is not None and job.status == "complete"
     assert llm.generations == 1
@@ -193,8 +210,7 @@ def test_retry_reuses_completed_embedding_batches(isolated_db, monkeypatch):
     monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     # Distinct headings prevent native peer merging, so this crosses the 64-input batch boundary.
     content = "\n\n".join(
-        f"# Section {index}\n"
-        + (f"Invoice reference ABC-{index} is due in thirty days. " * 40)
+        f"# Section {index}\n" + (f"Invoice reference ABC-{index} is due in thirty days. " * 40)
         for index in range(70)
     )
     _, version_id, job_id = seed_version(content)
@@ -449,3 +465,32 @@ def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(
     # With nothing stale or queued, an empty RETURNING result causes no update event.
     assert jobs.dispatch_pending_jobs() == 0
     assert notifications == [True]
+
+
+def test_changed_generation_configuration_rejects_queued_artifact_before_llm_call(
+    isolated_db, monkeypatch
+):
+    llm = FakeLLM()
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
+    _, version_id, ingest_job_id = seed_version()
+    jobs.run_job(ingest_job_id)
+    with database.session() as db, db.begin():
+        artifact = Artifact(
+            kind="summary",
+            signature=uuid4().hex,
+            version_ids=[version_id],
+            options={"generation_fingerprint": "different-configuration"},
+        )
+        db.add(artifact)
+        db.flush()
+        job = Job(kind="summary", resource_id=artifact.id)
+        db.add(job)
+        db.flush()
+        artifact_id, job_id = artifact.id, job.id
+    jobs.run_job(job_id)
+    with database.session() as db:
+        artifact = db.get(Artifact, artifact_id)
+        assert artifact.status == "failed" and artifact.data is None
+        assert "configuration changed" in artifact.error
+        assert db.get(Job, job_id).status == "failed"
+    assert llm.generations == 0

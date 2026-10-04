@@ -13,7 +13,7 @@ Project documents:
 
 ## Local development
 
-Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY` privately. Never commit the key. The default models are `openai/gpt-4.1-mini` and `openai/text-embedding-3-small` (1536 dimensions).
+Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY` privately. Never commit the key. Models are configured independently for chat, question rewriting, summaries, comparisons and embeddings; see the task settings below.
 
 Start dependencies and install the parser/runtime:
 
@@ -36,6 +36,22 @@ In `web/` run `bun install --frozen-lockfile` and `bun run dev --host 127.0.0.1`
 After pulling the LLM naming/HNSW update, stop your API/worker/dispatcher, run `uv run --extra parsing alembic upgrade head`, and restart them. The additive migration preserves existing usage records while renaming `ai_calls` to `llm_calls` and adds the HNSW index. PostgreSQL needs pgvector 0.8+ for filtered iterative scans. New uploads use Docling HybridChunker; existing ready versions retain their stored chunks. No automatic re-embedding or file deletion is performed.
 
 The local runtime was exercised on Python 3.13. The supplied Docker image targets Python 3.12; full `docker compose up --build` reproduction is still pending. Parser model assets download on first use; `uv run --extra parsing python scripts/warm_parser.py /path/to/small-scanned.pdf` can warm them first.
+
+## Configure LLM tasks
+
+Edit [`src/docvault/llm/prompts.py`](src/docvault/llm/prompts.py) for system prompts and summary word targets. [`src/docvault/llm/config.py`](src/docvault/llm/config.py) contains model defaults, context/output reservations, optional temperature and embedding batch capacities. All Pydantic response models are in `llm/types.py`.
+
+| Task | Repository default | Environment override |
+|---|---|---|
+| Chat answer and suggestions | `openai/gpt-4.1-mini` | `OPENROUTER_CHAT_MODEL` |
+| Follow-up question rewriting | `openai/gpt-4.1-nano` | `OPENROUTER_REWRITE_MODEL` |
+| Summary, category, tags and key insights | `openai/gpt-4.1-mini` | `OPENROUTER_SUMMARY_MODEL` |
+| Comparison dimension findings | `openai/gpt-4.1` | `OPENROUTER_COMPARISON_MODEL` |
+| Embeddings | `openai/text-embedding-3-small` | `OPENROUTER_EMBEDDING_MODEL` |
+
+Use the separate capacity variables in `.env.example`. Existing `OPENROUTER_CONTEXT_TOKENS`/`OPENROUTER_MAX_OUTPUT_TOKENS` configure chat only; the other tasks use `OPENROUTER_<TASK>_CONTEXT_TOKENS`/`OPENROUTER_<TASK>_MAX_OUTPUT_TOKENS`. Optional `OPENROUTER_<TASK>_TEMPERATURE` is omitted by default. Restart the API/worker/dispatcher after configuration or prompt edits. Configured capacities must fit the selected model's actual limits. Changing embedding model/dimensions requires compatible document/query embeddings and index migration/reprocessing.
+
+Generation passes Pydantic classes directly to the SDK's `parse`/`stream` helpers. OpenRouter receives a strict JSON schema with supporting-endpoint routing. Pydantic's native partial JSON parser exposes provisional response text during streaming; the SDK validates the complete model before persistence. Citation checks remain necessary: a correct JSON shape does not prove source support. Prompt/schema/task-setting changes invalidate answer/artifact reuse; queued artifacts fail clearly if their generation configuration changed before execution. Existing completed historical insights remain retained.
 
 ## Generate migrations
 

@@ -36,3 +36,36 @@ class ParsedDocument(StrictModel):
     text: str
     page_count: int | None
     parser: str
+
+
+class RewrittenQuestion(StrictModel):
+    question: str = Field(min_length=1)
+    needs_clarification: bool
+    clarification: str
+
+
+class KeyInsight(StrictModel):
+    text: str
+    citation_ids: list[str] = Field(min_length=1)
+
+
+class DocumentInsights(StrictModel):
+    summary: str = Field(min_length=1)
+    category: str
+    tags: list[str] = Field(max_length=8)
+    key_insights: list[KeyInsight] = Field(max_length=8)
+    suggestions: list[str] = Field(max_length=3)
+    citation_ids: list[str] = Field(min_length=1)
+
+
+class ComparisonCell(StrictModel):
+    version_id: str
+    text: str
+    status: Literal["found", "not_found"]
+    citation_ids: list[str]
+
+
+class DimensionFinding(StrictModel):
+    text: str
+    status: Literal["found", "not_found"]
+    citation_ids: list[str]

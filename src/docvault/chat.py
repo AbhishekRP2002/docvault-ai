@@ -17,6 +17,7 @@ from docvault.db import session
 from docvault.documents import require_versions
 from docvault.errors import AppError
 from docvault.llm.graphs import run_document_chat_workflow
+from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import ProviderError
 from docvault.llm.types import Answer, Evidence
 from docvault.models import Chat, Message, now
@@ -220,11 +221,14 @@ async def generate_assistant_response(message_id: str, emit_generation_event):
             versions = require_versions(db, version_ids)
             key = "answer:" + calculate_json_fingerprint(
                 [
-                    "chat-v1",
+                    "chat-v2",
                     [(v.id, v.sha256, v.embedding_model) for v in versions],
                     question,
                     history,
-                    settings.openrouter_chat_model,
+                    [
+                        build_generation_identity(llm.generation_model(task), task)
+                        for task in ("chat", "rewrite")
+                    ],
                     settings.openrouter_embedding_model,
                 ]
             )
