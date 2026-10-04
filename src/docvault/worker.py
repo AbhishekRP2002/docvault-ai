@@ -11,7 +11,7 @@ from rq.worker import SpawnWorker
 from docvault.cache import redis_client
 
 
-def _heartbeat(stop: threading.Event) -> None:
+def _publish_worker_heartbeat(stop: threading.Event) -> None:
     """Refresh the worker's expiring Redis heartbeat until stopped, tolerating Redis outages."""
     while not stop.is_set():
         try:
@@ -25,7 +25,7 @@ def main() -> None:
     """Run the document queue consumer with a background heartbeat and graceful thread cleanup."""
     worker_type = SpawnWorker if sys.platform == "darwin" else Worker
     stop = threading.Event()
-    heartbeat = threading.Thread(target=_heartbeat, args=(stop,), daemon=True)
+    heartbeat = threading.Thread(target=_publish_worker_heartbeat, args=(stop,), daemon=True)
     heartbeat.start()
     try:
         worker_type(["docvault"], connection=redis_client()).work()

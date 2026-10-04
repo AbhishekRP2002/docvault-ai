@@ -25,7 +25,7 @@ The source selector loads every page of the document library; it has no hidden d
 
 `Dockerfile` produces a static nginx deployment, with same-origin API, WebSocket, and SSE proxying to `api:8000`. Use the repository Compose stack so that hostname resolves.
 
-The application polls during processing and reconnects the update WebSocket after disconnection. Markdown is rendered without raw HTML, and source identifiers become numbered citation buttons. The frontend has no provider credentials or client-side AI calls.
+The application polls during processing and reconnects the update WebSocket after disconnection. Markdown is rendered without raw HTML, and source identifiers become numbered citation buttons. The frontend has no provider credentials or client-side LLM calls.
 
 The shadcn primitives follow [the official Vite installation](https://ui.shadcn.com/docs/installation/vite), [Radix sheet implementation](https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/new-york-v4/ui/sheet.tsx), and [Radix AlertDialog](https://ui.shadcn.com/docs/components/alert-dialog). Dashboard primitives remain local. Chat uses `@assistant-ui/react` 0.15.23 [External Store Runtime](https://www.assistant-ui.com/docs/runtimes/custom/external-store) with canonical React Query messages and the existing Python SSE send/retry/cancel handlers. Thread/Message/Composer primitives manage the transcript and input; Suggestion and Reload primitives route follow-ups and latest-turn retries. Citation-aware Markdown, the source picker, clipboard failure feedback, and Past Runs menus retain their existing presentation. Python/SQL remain the history authority; there is no Assistant Cloud or frontend model call.
 

@@ -16,7 +16,7 @@ MIME_TYPES = {
 }
 
 
-def storage_file(key: str) -> Path:
+def resolve_storage_path(key: str) -> Path:
     """Resolve a storage key within the configured root and reject paths escaping it."""
     root = get_settings().storage_path.resolve()
     target = (root / key).resolve()
@@ -25,7 +25,7 @@ def storage_file(key: str) -> Path:
     return target
 
 
-async def store_upload(upload: UploadFile) -> dict:
+async def store_validated_upload(upload: UploadFile) -> dict:
     """Stream, hash, and validate an upload before adopting its private storage file.
 
     Enforce byte and format safeguards and remove partial files on failure.
@@ -35,7 +35,7 @@ async def store_upload(upload: UploadFile) -> dict:
     if suffix not in MIME_TYPES:
         raise AppError(415, "unsupported_format", "Choose a PDF, DOCX, or UTF-8 text file.")
     key = f"sources/{uuid4()}{suffix}"
-    target = storage_file(key)
+    target = resolve_storage_path(key)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(suffix + ".part")
     digest, size = hashlib.sha256(), 0
@@ -53,7 +53,7 @@ async def store_upload(upload: UploadFile) -> dict:
             os.fsync(stream.fileno())
         if not size:
             raise AppError(422, "empty_file", "The uploaded file is empty.")
-        validate_file(temporary, suffix)
+        validate_uploaded_file(temporary, suffix)
         temporary.replace(target)
         return dict(
             filename=filename,
@@ -68,7 +68,7 @@ async def store_upload(upload: UploadFile) -> dict:
         raise
 
 
-def validate_file(path: Path, suffix: str):
+def validate_uploaded_file(path: Path, suffix: str):
     """Check PDF headers, UTF-8 text, or DOCX container structure and expansion safeguards."""
     with path.open("rb") as stream:
         prefix = stream.read(1024)

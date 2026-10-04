@@ -11,8 +11,8 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 from pydantic import Field
 
-from docvault.ai.provider import DeltaCallback, OpenRouterAI
-from docvault.ai.types import Answer, Evidence, StrictModel
+from docvault.llm.provider import DeltaCallback, OpenRouterLLM
+from docvault.llm.types import Answer, Evidence, StrictModel
 
 
 class InvalidCitationError(ValueError):
@@ -34,23 +34,23 @@ class ChatState(TypedDict, total=False):
     answer: Answer
 
 
-def validate_citations(citation_ids: list[str], evidence: list[Evidence]) -> None:
+def validate_citation_ids(citation_ids: list[str], evidence: list[Evidence]) -> None:
     """Reject IDs outside the supplied evidence; this does not verify claim support."""
     allowed = {item.id for item in evidence}
     if set(citation_ids) - allowed:
         raise InvalidCitationError("The generated result referenced an unknown source.")
 
 
-def evidence_payload(evidence: list[Evidence]) -> str:
+def serialize_evidence_payload(evidence: list[Evidence]) -> str:
     """Serialize source passages and their metadata as Unicode-preserving JSON."""
     return json.dumps([item.model_dump() for item in evidence], ensure_ascii=False)
 
 
-async def run_chat(
+async def run_document_chat_workflow(
     question: str,
     history: list[dict],
-    retrieve: Callable[[str], Awaitable[list[Evidence]]],
-    ai: OpenRouterAI,
+    retrieve_relevant_chunks: Callable[[str], Awaitable[list[Evidence]]],
+    llm: OpenRouterLLM,
     on_delta: DeltaCallback,
 ) -> tuple[Answer, list[Evidence], str]:
     """Run question rewriting, retrieval, generation, and citation validation.
@@ -68,11 +68,11 @@ async def run_chat(
         if item.get("role") in {"user", "assistant"} and isinstance(item.get("content"), str)
     ]
 
-    async def rewrite(state: ChatState) -> dict:
+    async def rewrite_followup_question(state: ChatState) -> dict:
         """Resolve follow-up references with the model, or request clarification."""
         if not state["history"]:
             return {"query": state["question"], "clarification": ""}
-        result = await ai.structured(
+        result = await llm.generate_structured_response(
             RewrittenQuestion,
             [
                 {
@@ -103,11 +103,11 @@ async def run_chat(
             else "",
         }
 
-    async def retrieval(state: ChatState) -> dict:
+    async def retrieve_grounding_evidence(state: ChatState) -> dict:
         """Retrieve fresh evidence unless clarification is needed; reject conflicting IDs."""
         if state["clarification"]:
             return {"evidence": []}
-        found = await retrieve(state["query"])
+        found = await retrieve_relevant_chunks(state["query"])
         # Stable IDs must identify exactly one passage, not two conflicting sources.
         unique: dict[str, Evidence] = {}
         for item in found:
@@ -116,7 +116,7 @@ async def run_chat(
             unique[item.id] = item
         return {"evidence": list(unique.values())}
 
-    async def generate(state: ChatState) -> dict:
+    async def generate_grounded_answer(state: ChatState) -> dict:
         """Stream a grounded model answer, or return a local clarification or no-evidence result."""
         if state["clarification"]:
             return {
@@ -136,7 +136,7 @@ async def run_chat(
                     outcome="insufficient_evidence",
                 )
             }
-        answer = await ai.stream_answer(
+        answer = await llm.stream_structured_answer(
             [
                 {
                     "role": "system",
@@ -169,10 +169,10 @@ async def run_chat(
         )
         return {"answer": answer}
 
-    def validate(state: ChatState) -> dict:
+    def validate_generated_answer(state: ChatState) -> dict:
         """Require valid sources for answered results and deduplicate citation IDs in order."""
         answer = state["answer"]
-        validate_citations(answer.citation_ids, state["evidence"])
+        validate_citation_ids(answer.citation_ids, state["evidence"])
         if answer.outcome == "answered" and not answer.citation_ids:
             raise InvalidCitationError("An evidence-based answer must cite a source.")
         return {
@@ -184,13 +184,13 @@ async def run_chat(
         }
 
     graph = StateGraph(ChatState)
-    graph.add_node("rewrite", rewrite)
-    graph.add_node("retrieve", retrieval)
-    graph.add_node("generate", generate)
-    graph.add_node("validate", validate)
+    graph.add_node("rewrite", rewrite_followup_question)
+    graph.add_node("retrieve_relevant_chunks", retrieve_grounding_evidence)
+    graph.add_node("generate", generate_grounded_answer)
+    graph.add_node("validate", validate_generated_answer)
     graph.add_edge(START, "rewrite")
-    graph.add_edge("rewrite", "retrieve")
-    graph.add_edge("retrieve", "generate")
+    graph.add_edge("rewrite", "retrieve_relevant_chunks")
+    graph.add_edge("retrieve_relevant_chunks", "generate")
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", END)
     result = await graph.compile().ainvoke({"question": question, "history": turns})

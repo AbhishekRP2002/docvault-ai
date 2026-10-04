@@ -6,7 +6,7 @@ import time
 from redis.exceptions import RedisError
 from sqlalchemy.exc import OperationalError
 
-from docvault.jobs import dispatch_once
+from docvault.jobs import dispatch_pending_jobs
 
 
 def main() -> None:
@@ -15,7 +15,7 @@ def main() -> None:
     try:
         while True:
             try:
-                dispatch_once()
+                dispatch_pending_jobs()
             except (OperationalError, RedisError):
                 logging.warning("Dispatcher is waiting for PostgreSQL or Redis.")
             time.sleep(2)

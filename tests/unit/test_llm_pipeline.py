@@ -4,18 +4,27 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from docvault.ai.graphs import InvalidCitationError, RewrittenQuestion, run_chat
-from docvault.ai.insights import DimensionFinding, DocumentInsights, KeyInsight, compare, summarize
-from docvault.ai.parsing import Block, chunk_blocks, parse_file, parse_text, split_spans
-from docvault.ai.provider import (
+from docvault.llm.graphs import InvalidCitationError, RewrittenQuestion, run_document_chat_workflow
+from docvault.llm.insights import (
+    DimensionFinding,
+    DocumentInsights,
+    KeyInsight,
+    generate_document_comparison,
+    generate_document_summary,
+)
+from docvault.llm.parsing import (
+    parse_document_file,
+    parse_text_document,
+)
+from docvault.llm.provider import (
     ContextLimitError,
-    OpenRouterAI,
+    OpenRouterLLM,
     ProviderError,
-    response_prefix,
-    strict_schema,
+    build_strict_response_schema,
+    extract_streamed_response_prefix,
     token_count,
 )
-from docvault.ai.types import Answer, Evidence
+from docvault.llm.types import Answer, Evidence
 
 
 def source(id="c1", text="Payment is due in 30 days.", version="v1"):
@@ -43,7 +52,7 @@ def test_partial_response_streams_only_stable_complete_characters(value):
     previous = ""
     observed_before_completion = False
     for index in range(len(raw) + 1):
-        prefix = response_prefix(raw[:index])
+        prefix = extract_streamed_response_prefix(raw[:index])
         assert prefix.startswith(previous)
         assert value.startswith(prefix)
         observed_before_completion |= bool(prefix) and index < len(raw)
@@ -55,7 +64,7 @@ def test_partial_response_streams_only_stable_complete_characters(value):
 def test_answer_contract_and_strict_schema():
     with pytest.raises(ValidationError):
         Answer(response="Hi", suggestions=["a", "b", "c", "d"], citation_ids=[], outcome="answered")
-    schema = strict_schema(Answer)["json_schema"]
+    schema = build_strict_response_schema(Answer)["json_schema"]
     assert schema["strict"] is True
     assert schema["schema"]["additionalProperties"] is False
     assert set(schema["schema"]["required"]) == {
@@ -69,10 +78,7 @@ def test_answer_contract_and_strict_schema():
 def test_long_unicode_text_keeps_every_character_without_token_cap():
     text = "Privacy café 🔐 and information. " * 15000
     assert token_count(text) > 100_000
-    spans = split_spans(text, 97)
-    assert "".join(text[a:b] for a, b in spans) == text
-    assert all(token_count(text[a:b]) <= 97 for a, b in spans)
-    parsed = parse_text(text, "terms.txt")
+    parsed = parse_text_document(text, "terms.txt")
     assert parsed.text == text
     assert "".join(chunk.text for chunk in parsed.chunks) == text
     assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
@@ -84,69 +90,101 @@ def test_txt_citations_refer_to_exact_lines_and_characters(tmp_path):
     text = "# Terms\nPayment due in 30 days.\n\nRenewal is annual.\n"
     path = tmp_path / "terms.txt"
     path.write_text(text)
-    parsed = parse_file(path, "text/plain", "terms.txt")
-    assert parsed.chunks[0].location["line_start"] == 1
-    assert parsed.chunks[-1].location["line_start"] == 4
+    parsed = parse_document_file(path, "text/plain", "terms.txt")
+    assert parsed.chunks[0].location["char_start"] == 0
+    assert parsed.chunks[-1].location["char_end"] == len(text)
     for chunk in parsed.chunks:
-        assert text[chunk.location["char_start"] : chunk.location["char_end"]] == chunk.text
+        start, end = chunk.location["char_start"], chunk.location["char_end"]
+        assert text[start:end] == chunk.text
+        assert chunk.location["line_start"] == text[:start].count("\n") + 1
+        assert chunk.location["line_end"] == (
+            chunk.location["line_start"] + chunk.text.rstrip("\n").count("\n")
+        )
     with pytest.raises(ValueError, match="No readable"):
-        parse_text("\n  \n", "empty.txt")
+        parse_text_document("\n  \n", "empty.txt")
     path.write_bytes(b"\xff\xfe")
     with pytest.raises(ValueError, match="UTF-8"):
-        parse_file(path, "text/plain", "bad.txt")
+        parse_document_file(path, "text/plain", "bad.txt")
 
 
 def test_tables_repeat_headers_and_preserve_all_rows():
-    header = "| item | price |\n| --- | --- |\n"
-    rows = [f"| Product {index} | {index} USD |\n" for index in range(300)]
-    chunks = chunk_blocks(
-        [Block(header + "".join(rows), {"item_id": "table1"}, ("Pricing",), True)], "quote.pdf"
-    )
-    assert len(chunks) > 1
-    assert all(chunk.text.startswith(header) for chunk in chunks)
-    assert all(chunk.token_count <= 600 for chunk in chunks)
-    assert "".join(chunk.text[len(header) :] for chunk in chunks) == "".join(rows)
-    assert chunks[-1].location["table_row_end"] == 302
+    import re
+
+    from docling_core.types.doc import DoclingDocument, TableCell, TableData
+
+    from docvault.llm.parsing import chunk_docling_document
+
+    document = DoclingDocument(name="quote")
+    document.add_heading("Pricing")
+    cells = []
+    rows = [["item", "price"], *[[f"Product {index}", f"{index} USD"] for index in range(300)]]
+    for row_number, row in enumerate(rows):
+        for column, value in enumerate(row):
+            cells.append(
+                TableCell(
+                    text=value,
+                    start_row_offset_idx=row_number,
+                    end_row_offset_idx=row_number + 1,
+                    start_col_offset_idx=column,
+                    end_col_offset_idx=column + 1,
+                    column_header=row_number == 0,
+                )
+            )
+    document.add_table(data=TableData(table_cells=cells, num_rows=len(rows), num_cols=2))
+    parsed = chunk_docling_document(document, "quote.pdf", is_pdf=True)
+    table_chunks = [chunk for chunk in parsed.chunks if "Product" in chunk.text]
+    assert len(table_chunks) > 1
+    headers = table_chunks[0].text.splitlines()[:2]
+    assert "item" in headers[0] and "price" in headers[0]
+    assert all(chunk.text.splitlines()[:2] == headers for chunk in table_chunks)
+    assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
+    actual_rows = re.findall(r"\|\s*Product (\d+)\s*\|\s*(\d+) USD\s*\|", "\n".join(chunk.text for chunk in table_chunks))
+    assert actual_rows == [(str(index), str(index)) for index in range(300)]
 
 
 def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeypatch, tmp_path):
-    from docvault.ai import parsing
+    from docling_core.types.doc import (
+        BoundingBox,
+        DocItemLabel,
+        DoclingDocument,
+        ProvenanceItem,
+        Size,
+    )
 
-    provenance = SimpleNamespace(
+    from docvault.llm import parsing
+
+    document = DoclingDocument(name="contract")
+    for page in range(1, 4):
+        document.add_page(page_no=page, size=Size(width=200, height=300))
+    provenance = ProvenanceItem(
         page_no=3,
-        charspan=(0, 24),
-        bbox=SimpleNamespace(model_dump=lambda **kwargs: {"l": 10, "t": 20, "r": 100, "b": 30}),
+        charspan=(0, 25),
+        bbox=BoundingBox(l=10, t=20, r=100, b=30),
     )
-    heading = SimpleNamespace(
-        label="section_header", text="Terms", self_ref="#/texts/0", prov=[provenance], level=1
+    heading = document.add_heading("Terms", prov=provenance)
+    paragraph = document.add_text(
+        label=DocItemLabel.TEXT, text="Payment is due in 30 days.", prov=provenance
     )
-    paragraph = SimpleNamespace(
-        label="text", text="Payment is due in 30 days.", self_ref="#/texts/1", prov=[provenance]
-    )
-    document = SimpleNamespace(
-        iterate_items=lambda: [(heading, 1), (paragraph, 1)],
-        pages={1: {}, 2: {}, 3: {}},
-        export_to_markdown=lambda: "# Terms\nPayment is due in 30 days.",
-    )
-    monkeypatch.setattr(parsing.importlib.metadata, "version", lambda name: "test")
-    parsed = parsing.parse_docling_document(document, "contract.pdf", is_pdf=True)
+    parsed = parsing.chunk_docling_document(document, "contract.pdf", is_pdf=True)
     assert parsed.page_count == 3
-    assert len(parsed.chunks) == 1
-    assert parsed.chunks[0].location["page"] == 3
-    assert parsed.chunks[0].location["headings"] == ["Terms"]
-    assert parsed.chunks[0].location["spans"][0]["bbox"]["l"] == 10
-    source_spans = parsed.chunks[0].location["source_spans"]
-    assert [span["item_id"] for span in source_spans] == ["#/texts/0", "#/texts/1"]
-    assert parsed.chunks[0].text[source_spans[1]["text_char_start"] :] == paragraph.text
+    assert all(chunk.location["page"] == 3 for chunk in parsed.chunks)
+    content_chunks = [chunk for chunk in parsed.chunks if paragraph.text in chunk.text]
+    assert len(content_chunks) == 1
+    assert content_chunks[0].location["headings"] == ["Terms"]
+    assert all(chunk.location["spans"][0]["bbox"]["l"] == 10 for chunk in parsed.chunks)
+    item_ids = {
+        span["item_id"] for chunk in parsed.chunks for span in chunk.location["source_spans"]
+    }
+    assert heading.self_ref in item_ids and paragraph.self_ref in item_ids
     converter = SimpleNamespace(
         convert=lambda *args, **kwargs: SimpleNamespace(status="partial_success")
     )
-    monkeypatch.setattr(parsing, "_converter", lambda: converter)
+    monkeypatch.setattr(parsing, "_get_document_converter", lambda: converter)
     with pytest.raises(ValueError, match="incomplete"):
-        parse_file(tmp_path / "contract.pdf", "application/pdf", "contract.pdf")
+        parse_document_file(tmp_path / "contract.pdf", "application/pdf", "contract.pdf")
 
 
-class ChatAI:
+class ChatLLM:
     def __init__(self, answer=None, rewrite=None):
         self.answer = answer or Answer(
             response="Payment is due in 30 days. [c1]",
@@ -157,11 +195,11 @@ class ChatAI:
         self.rewrite = rewrite
         self.generations = 0
 
-    async def structured(self, schema, messages):
+    async def generate_structured_response(self, schema, messages):
         assert schema is RewrittenQuestion
         return self.rewrite
 
-    async def stream_answer(self, messages, on_delta):
+    async def stream_structured_answer(self, messages, on_delta):
         self.generations += 1
         await on_delta(self.answer.response)
         return self.answer
@@ -171,27 +209,27 @@ class ChatAI:
 async def test_graph_rewrites_followups_then_retrieves_fresh_evidence():
     queries, deltas = [], []
 
-    async def retrieve(query):
+    async def retrieve_relevant_chunks(query):
         queries.append(query)
         return [source()]
 
     async def delta(value):
         deltas.append(value)
 
-    ai = ChatAI(
+    llm = ChatLLM(
         rewrite=RewrittenQuestion(
             question="When is the contract payment due?",
             needs_clarification=False,
             clarification="",
         )
     )
-    answer, evidence, query = await run_chat(
+    answer, evidence, query = await run_document_chat_workflow(
         "When is it due?",
         [
             {"role": "user", "content": "Tell me about payment."},
         ],
-        retrieve,
-        ai,
+        retrieve_relevant_chunks,
+        llm,
         delta,
     )
     assert queries == [query] == ["When is the contract payment due?"]
@@ -202,22 +240,22 @@ async def test_graph_rewrites_followups_then_retrieves_fresh_evidence():
 
 @pytest.mark.asyncio
 async def test_graph_without_evidence_does_not_generate_or_fake_deltas():
-    ai, deltas = ChatAI(), []
+    llm, deltas = ChatLLM(), []
 
-    async def retrieve(query):
+    async def retrieve_relevant_chunks(query):
         return []
 
     async def delta(value):
         deltas.append(value)
 
-    answer, evidence, _ = await run_chat("Is there a fee?", [], retrieve, ai, delta)
+    answer, evidence, _ = await run_document_chat_workflow("Is there a fee?", [], retrieve_relevant_chunks, llm, delta)
     assert answer.outcome == "insufficient_evidence"
-    assert evidence == [] and deltas == [] and ai.generations == 0
+    assert evidence == [] and deltas == [] and llm.generations == 0
 
 
 @pytest.mark.asyncio
 async def test_graph_ambiguous_followup_skips_retrieval():
-    ai = ChatAI(
+    llm = ChatLLM(
         rewrite=RewrittenQuestion(
             question="Which contract?",
             needs_clarification=True,
@@ -225,35 +263,35 @@ async def test_graph_ambiguous_followup_skips_retrieval():
         )
     )
 
-    async def retrieve(query):
+    async def retrieve_relevant_chunks(query):
         pytest.fail("Ambiguous questions must not run retrieval")
 
     async def delta(value):
         pytest.fail("Clarification is a final response, not a fake model stream")
 
-    answer, _, _ = await run_chat(
-        "What about it?", [{"role": "user", "content": "Compare contracts"}], retrieve, ai, delta
+    answer, _, _ = await run_document_chat_workflow(
+        "What about it?", [{"role": "user", "content": "Compare contracts"}], retrieve_relevant_chunks, llm, delta
     )
     assert answer.outcome == "clarification_needed"
-    assert ai.generations == 0
+    assert llm.generations == 0
 
 
 @pytest.mark.asyncio
 async def test_graph_rejects_invented_citation_ids():
-    ai = ChatAI(
+    llm = ChatLLM(
         Answer(
             response="A fee exists", suggestions=[], citation_ids=["invented"], outcome="answered"
         )
     )
 
-    async def retrieve(query):
+    async def retrieve_relevant_chunks(query):
         return [source()]
 
     async def delta(value):
         pass
 
     with pytest.raises(InvalidCitationError):
-        await run_chat("Fee?", [], retrieve, ai, delta)
+        await run_document_chat_workflow("Fee?", [], retrieve_relevant_chunks, llm, delta)
 
 
 class FakeChunk:
@@ -294,11 +332,11 @@ class FakeStream:
 async def test_provider_streams_partial_response_before_end_and_records_usage():
     usage, deltas, requested = [], [], []
 
-    async def on_usage(value):
+    async def record_llm_call_async(value):
         usage.append(value)
 
-    ai = OpenRouterAI(
-        "test-key", "https://example.test/v1", "test/model", "test/embed", on_usage=on_usage
+    llm = OpenRouterLLM(
+        "test-key", "https://example.test/v1", "test/model", "test/embed", record_llm_call_async=record_llm_call_async
     )
     stream = FakeStream(
         [
@@ -317,11 +355,11 @@ async def test_provider_streams_partial_response_before_end_and_records_usage():
         assert not stream.closed
         deltas.append(value)
 
-    ai.client.chat.completions.create = create
+    llm.client.chat.completions.create = create
     try:
-        answer = await ai.stream_answer([{"role": "user", "content": "Payment?"}], delta)
+        answer = await llm.stream_structured_answer([{"role": "user", "content": "Payment?"}], delta)
     finally:
-        await ai.close()
+        await llm.close()
     assert deltas == ["Payment", " in 30 days."]
     assert answer.response == "Payment in 30 days."
     assert stream.closed
@@ -333,7 +371,7 @@ async def test_provider_streams_partial_response_before_end_and_records_usage():
 
 @pytest.mark.asyncio
 async def test_provider_rejects_truncated_stream_and_closes_connection():
-    ai = OpenRouterAI("test-key", "https://example.test/v1", "test/model", "test/embed")
+    llm = OpenRouterLLM("test-key", "https://example.test/v1", "test/model", "test/embed")
     stream = FakeStream([FakeChunk('{"response":"Partial'), FakeChunk(finish="length")])
 
     async def create(**kwargs):
@@ -342,18 +380,18 @@ async def test_provider_rejects_truncated_stream_and_closes_connection():
     async def delta(value):
         pass
 
-    ai.client.chat.completions.create = create
+    llm.client.chat.completions.create = create
     try:
         with pytest.raises(ProviderError, match="before completion"):
-            await ai.stream_answer([], delta)
+            await llm.stream_structured_answer([], delta)
     finally:
-        await ai.close()
+        await llm.close()
     assert stream.closed
 
 
 @pytest.mark.asyncio
 async def test_provider_context_limit_fails_without_truncation_or_request():
-    ai = OpenRouterAI(
+    llm = OpenRouterLLM(
         "test-key",
         "https://example.test/v1",
         "test/model",
@@ -363,14 +401,14 @@ async def test_provider_context_limit_fails_without_truncation_or_request():
     )
     try:
         with pytest.raises(ContextLimitError):
-            await ai.structured(Answer, [{"role": "user", "content": "evidence " * 1000}])
+            await llm.generate_structured_response(Answer, [{"role": "user", "content": "evidence " * 1000}])
     finally:
-        await ai.close()
+        await llm.close()
 
 
 @pytest.mark.asyncio
 async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions():
-    ai = OpenRouterAI(
+    llm = OpenRouterLLM(
         "test-key", "https://example.test/v1", "test/model", "test/embed", embedding_dimensions=2
     )
     requests = []
@@ -384,26 +422,26 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions():
             data=list(reversed(items)), model_dump=lambda: {"usage": {"prompt_tokens": 3}}
         )
 
-    ai.client.embeddings.create = create
+    llm.client.embeddings.create = create
     try:
-        vectors = await ai.embed([f"Text {i}" for i in range(65)])
+        vectors = await llm.embed_texts([f"Text {i}" for i in range(65)])
         assert len(vectors) == 65 and vectors[0] == [0, 1] and vectors[63] == [63, 1]
         assert [len(request["input"]) for request in requests] == [64, 1]
-        ai.embedding_dimensions = 3
+        llm.embedding_dimensions = 3
         with pytest.raises(ProviderError, match="dimensions"):
-            await ai.embed(["Text"])
+            await llm.embed_texts(["Text"])
     finally:
-        await ai.close()
+        await llm.close()
 
 
-class SummaryAI:
+class SummaryLLM:
     context_tokens = 4000
     max_output_tokens = 800
 
     def __init__(self):
         self.calls = []
 
-    async def structured(self, schema, messages):
+    async def generate_structured_response(self, schema, messages):
         payload = json.loads(messages[-1]["content"])
         self.calls.append(payload)
         ids = [id for section in payload["sections"] for id in section["citation_ids"]]
@@ -421,25 +459,25 @@ class SummaryAI:
 
 @pytest.mark.asyncio
 async def test_long_summary_processes_every_chunk_then_reduces():
-    ai = SummaryAI()
+    llm = SummaryLLM()
     evidence = [source(f"c{i}", "Payment details. " * 120) for i in range(9)]
-    result = await summarize(ai, evidence, focus_areas=["Payment"], tone="executive")
+    result = await generate_document_summary(llm, evidence, focus_areas=["Payment"], tone="executive")
     original_ids = {
         id
-        for call in ai.calls
+        for call in llm.calls
         for section in call["sections"]
         if "text" in section
         for id in section["citation_ids"]
     }
     assert original_ids == {item.id for item in evidence}
-    assert len(ai.calls) > 1
+    assert len(llm.calls) > 1
     assert result["coverage"] == {"chunks_processed": 9, "total_chunks": 9, "complete": True}
     assert result["options"]["tone"] == "executive"
 
 
 @pytest.mark.asyncio
 async def test_comparison_preserves_all_selected_versions_and_reports_missing():
-    ai = SummaryAI()
+    llm = SummaryLLM()
     evidence = {
         "v1": [source()],
         "v2": [],
@@ -447,7 +485,7 @@ async def test_comparison_preserves_all_selected_versions_and_reports_missing():
         "v4": [],
         "v5": [],
     }
-    result = await compare(ai, evidence, ["Payment"])
+    result = await generate_document_comparison(llm, evidence, ["Payment"])
     cells = result["rows"][0]["cells"]
     assert [cell["version_id"] for cell in cells] == list(evidence)
     assert cells[0]["status"] == "found" and cells[0]["citation_ids"] == ["c1"]
@@ -457,9 +495,9 @@ async def test_comparison_preserves_all_selected_versions_and_reports_missing():
 
 @pytest.mark.asyncio
 async def test_summary_rejects_citations_invented_by_provider():
-    ai = SummaryAI()
+    llm = SummaryLLM()
 
-    async def structured(schema, messages):
+    async def generate_structured_response(schema, messages):
         return DocumentInsights(
             summary="Oops",
             category="Other",
@@ -469,6 +507,6 @@ async def test_summary_rejects_citations_invented_by_provider():
             citation_ids=["invented"],
         )
 
-    ai.structured = structured
+    llm.generate_structured_response = generate_structured_response
     with pytest.raises(InvalidCitationError):
-        await summarize(ai, [source()])
+        await generate_document_summary(llm, [source()])

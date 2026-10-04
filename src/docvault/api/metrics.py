@@ -2,13 +2,13 @@ from fastapi import APIRouter
 from sqlalchemy import func, select
 
 from docvault.db import session
-from docvault.models import AICall, Document, Job, MetricBucket, Version
+from docvault.models import Document, Job, LLMCall, MetricBucket, Version
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 
 
 @router.get("/documents")
-def document_metrics():
+def get_document_metrics():
     """Count live documents, their version statuses, and total source-file storage bytes."""
     with session() as db:
         docs = db.scalar(
@@ -26,7 +26,7 @@ def document_metrics():
 
 
 @router.get("/processing")
-def processing_metrics():
+def get_processing_metrics():
     """Return job counts and mean/p95 completed-job durations in milliseconds."""
     with session() as db:
         counts = dict(db.execute(select(Job.status, func.count()).group_by(Job.status)).all())
@@ -47,16 +47,16 @@ def processing_metrics():
 
 
 @router.get("/usage")
-def usage_metrics():
-    """Sum recorded AI tokens and known costs, count unknown-cost calls, and report cache hits."""
+def get_llm_usage_metrics():
+    """Sum recorded LLM tokens and known costs, count unknown-cost calls, and report cache hits."""
     with session() as db:
         inputs, outputs, cost, requests, unknown = db.execute(
             select(
-                func.coalesce(func.sum(AICall.input_tokens), 0),
-                func.coalesce(func.sum(AICall.output_tokens), 0),
-                func.coalesce(func.sum(AICall.cost_usd), 0),
+                func.coalesce(func.sum(LLMCall.input_tokens), 0),
+                func.coalesce(func.sum(LLMCall.output_tokens), 0),
+                func.coalesce(func.sum(LLMCall.cost_usd), 0),
                 func.count(),
-                func.count().filter(AICall.cost_usd.is_(None)),
+                func.count().filter(LLMCall.cost_usd.is_(None)),
             )
         ).one()
         hits = db.scalar(

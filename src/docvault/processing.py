@@ -7,47 +7,54 @@ from pathlib import Path
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
-from docvault.ai.insights import compare, summarize
-from docvault.ai.parsing import parse_file
-from docvault.ai.provider import token_count
-from docvault.ai.types import Evidence, ParsedDocument
-from docvault.cache import cache_get, cache_set, count_metric, notify_change, signature
+from docvault.cache import (
+    cache_get,
+    cache_set,
+    calculate_json_fingerprint,
+    count_metric,
+    notify_change,
+)
 from docvault.config import get_settings
 from docvault.db import session
 from docvault.documents import require_document, require_version
-from docvault.integrations import create_ai
+from docvault.integrations import create_llm_client
 from docvault.jobs import SourceDeleted, job_checkpoint
+from docvault.llm.insights import generate_document_comparison, generate_document_summary
+from docvault.llm.parsing import parse_document_file
+from docvault.llm.provider import token_count
+from docvault.llm.types import Evidence, ParsedDocument
 from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, Version, now
-from docvault.storage import storage_file
+from docvault.retrieval import create_cited_evidence_record
+from docvault.storage import resolve_storage_path
 
 
-def parsed_path(version_id: str) -> Path:
+def get_parsed_document_path(version_id: str) -> Path:
     """Return the workspace path for a version's canonical parsed JSON."""
-    return storage_file(f"parsed/{version_id}.json")
+    return resolve_storage_path(f"parsed/{version_id}.json")
 
 
-def parser_fingerprint(version: Version) -> str:
+def calculate_parser_fingerprint(version: Version) -> str:
     """Hash the source identity and parser, chunker, and OCR configuration for reuse."""
     parser = "utf8-v1"
     if version.mime_type != "text/plain":
         parser = f"docling-{importlib.metadata.version('docling')}"
-    return signature(
+    return calculate_json_fingerprint(
         {
             "sha256": version.sha256,
             "filename": version.filename,
             "parser": parser,
-            "chunker": "structure-600-v1",
+            "chunker": f"docling-hybrid-600-v2-core-{importlib.metadata.version('docling-core')}",
             "ocr": "rapidocr-english-torch",
         }
     )
 
 
-def _read_parsed(version_id: str, fingerprint: str) -> ParsedDocument | None:
+def _load_cached_parsed_document(version_id: str, fingerprint: str) -> ParsedDocument | None:
     """Load a valid parsed artifact only when its saved fingerprint matches.
 
     Missing, outdated, or invalid artifacts are treated as cache misses.
     """
-    path = parsed_path(version_id)
+    path = get_parsed_document_path(version_id)
     try:
         if path.with_suffix(".fingerprint").read_text() != fingerprint:
             return None
@@ -56,12 +63,14 @@ def _read_parsed(version_id: str, fingerprint: str) -> ParsedDocument | None:
         return None
 
 
-def _write_parsed(version_id: str, parsed: ParsedDocument, fingerprint: str, token: int) -> None:
+def _persist_parsed_document(
+    version_id: str, parsed: ParsedDocument, fingerprint: str, token: int
+) -> None:
     """Atomically replace the parsed JSON, then write its reuse fingerprint.
 
     Flush the temporary file to disk and remove it even if writing fails.
     """
-    path = parsed_path(version_id)
+    path = get_parsed_document_path(version_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{token}.tmp")
     try:
@@ -75,7 +84,7 @@ def _write_parsed(version_id: str, parsed: ParsedDocument, fingerprint: str, tok
         temporary.unlink(missing_ok=True)
 
 
-def _require_artifact(db: Session, artifact_id: str) -> Artifact:
+def _get_required_artifact(db: Session, artifact_id: str) -> Artifact:
     """Return an existing artifact or signal that its source resource was removed."""
     artifact = db.get(Artifact, artifact_id)
     if artifact is None:
@@ -83,7 +92,7 @@ def _require_artifact(db: Session, artifact_id: str) -> Artifact:
     return artifact
 
 
-def _set_stage(job_id: str, token: int, stage: str) -> None:
+def _update_processing_stage(job_id: str, token: int, stage: str) -> None:
     """Verify job ownership and commit the stage to its associated resource.
 
     Publish a change notification after the transaction commits.
@@ -96,14 +105,14 @@ def _set_stage(job_id: str, token: int, stage: str) -> None:
         elif job.kind == "insights":
             require_version(db, job.resource_id, ready=True).insight_status = "running"
         elif job.kind in {"summary", "comparison"}:
-            _require_artifact(db, job.resource_id).status = "running"
+            _get_required_artifact(db, job.resource_id).status = "running"
     notify_change()
 
 
-def _canonical(version: Version) -> tuple[ParsedDocument, str]:
+def _load_or_parse_document(version: Version) -> tuple[ParsedDocument, str]:
     """Reuse matching parsed content from this or another live version, or parse the file."""
-    fingerprint = parser_fingerprint(version)
-    existing = _read_parsed(version.id, fingerprint)
+    fingerprint = calculate_parser_fingerprint(version)
+    existing = _load_cached_parsed_document(version.id, fingerprint)
     if existing:
         count_metric("parser_cache_hit")
         return existing, fingerprint
@@ -121,16 +130,18 @@ def _canonical(version: Version) -> tuple[ParsedDocument, str]:
             )
         )
     for candidate in candidates:
-        existing = _read_parsed(candidate, fingerprint)
+        existing = _load_cached_parsed_document(candidate, fingerprint)
         if existing:
             count_metric("parser_cache_hit")
             return existing, fingerprint
-    return parse_file(
-        storage_file(version.storage_key), version.mime_type, version.filename
+    return parse_document_file(
+        resolve_storage_path(version.storage_key), version.mime_type, version.filename
     ), fingerprint
 
 
-def _prepare_chunks(job_id: str, token: int, parsed: ParsedDocument, fingerprint: str) -> None:
+def _persist_document_chunks(
+    job_id: str, token: int, parsed: ParsedDocument, fingerprint: str
+) -> None:
     """Persist parsed chunks and move a claimed ingestion job to embedding.
 
     Preserve vectors when ordered input hashes and the model match; refresh source locations.
@@ -139,11 +150,11 @@ def _prepare_chunks(job_id: str, token: int, parsed: ParsedDocument, fingerprint
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, "chunking")
         version = require_version(db, job.resource_id)
-        _write_parsed(version.id, parsed, fingerprint, token)
+        _persist_parsed_document(version.id, parsed, fingerprint, token)
         existing = list(
             db.scalars(select(Chunk).where(Chunk.version_id == version.id).order_by(Chunk.ordinal))
         )
-        hashes = [signature(chunk.embedding_text) for chunk in parsed.chunks]
+        hashes = [calculate_json_fingerprint(chunk.embedding_text) for chunk in parsed.chunks]
         reusable = (
             len(existing) == len(hashes)
             and [chunk.input_hash for chunk in existing] == hashes
@@ -178,10 +189,10 @@ def _prepare_chunks(job_id: str, token: int, parsed: ParsedDocument, fingerprint
     notify_change()
 
 
-def _embedding_key(input_hash: str) -> str:
+def _build_embedding_cache_key(input_hash: str) -> str:
     """Build a cache key scoped to the input hash, embedding model, and dimensions."""
     settings = get_settings()
-    return "embedding:" + signature(
+    return "embedding:" + calculate_json_fingerprint(
         [
             settings.openrouter_embedding_model,
             settings.embedding_dimensions,
@@ -190,7 +201,7 @@ def _embedding_key(input_hash: str) -> str:
     )
 
 
-def _valid_vector(value) -> bool:
+def _is_valid_embedding_vector(value) -> bool:
     """Check that a cached vector has the configured length and finite numeric values."""
     import math
 
@@ -201,10 +212,10 @@ def _valid_vector(value) -> bool:
     )
 
 
-def _reusable_vector(input_hash: str) -> list[float] | None:
+def _find_reusable_embedding(input_hash: str) -> list[float] | None:
     """Find a valid vector in Redis or a ready, undeleted version using the same model."""
-    cached = cache_get(_embedding_key(input_hash))
-    if _valid_vector(cached):
+    cached = cache_get(_build_embedding_cache_key(input_hash))
+    if _is_valid_embedding_vector(cached):
         count_metric("embedding_cache_hit")
         return cached
     with session() as db:
@@ -223,14 +234,14 @@ def _reusable_vector(input_hash: str) -> list[float] | None:
         )
     if value is not None:
         vector = [float(number) for number in value]
-        if _valid_vector(vector):
+        if _is_valid_embedding_vector(vector):
             count_metric("embedding_cache_hit")
-            cache_set(_embedding_key(input_hash), vector, ttl=86400)
+            cache_set(_build_embedding_cache_key(input_hash), vector, ttl=86400)
             return vector
     return None
 
 
-def _save_vectors(job_id: str, token: int, vectors: dict[str, list[float]]) -> None:
+def _persist_chunk_embeddings(job_id: str, token: int, vectors: dict[str, list[float]]) -> None:
     """Persist vectors under the current job claim, then cache them by embedding input."""
     with session() as db, db.begin():
         job = job_checkpoint(db, job_id, token, "embedding")
@@ -244,10 +255,10 @@ def _save_vectors(job_id: str, token: int, vectors: dict[str, list[float]]) -> N
                 .values(embedding=vector)
             )
     for input_hash, vector in vectors.items():
-        cache_set(_embedding_key(input_hash), vector, ttl=86400)
+        cache_set(_build_embedding_cache_key(input_hash), vector, ttl=86400)
 
 
-async def _embed_missing(job_id: str, token: int, version_id: str) -> None:
+async def _embed_missing_chunks(job_id: str, token: int, version_id: str) -> None:
     """Reuse known vectors and embed the remaining distinct inputs in microbatches.
 
     Checkpoint ownership before each provider batch and persist completed batches for retry.
@@ -267,41 +278,43 @@ async def _embed_missing(job_id: str, token: int, version_id: str) -> None:
     unique = {chunk.input_hash: chunk.embedding_text for chunk in pending}
     missing, reused = [], {}
     for input_hash, text in unique.items():
-        cached = _reusable_vector(input_hash)
+        cached = _find_reusable_embedding(input_hash)
         if cached is not None:
             reused[input_hash] = cached
         else:
             missing.append((input_hash, text))
     if reused:
-        _save_vectors(job_id, token, reused)
+        _persist_chunk_embeddings(job_id, token, reused)
     if not missing:
         return
-    ai = create_ai(version_id)
+    llm = create_llm_client(version_id)
     try:
         batch, size = [], 0
 
-        async def save_batch(items):
+        async def embed_and_persist_batch(items):
             """Verify ownership, embed this batch, and save vectors keyed by input hash."""
             with session() as db, db.begin():
                 job_checkpoint(db, job_id, token, "embedding")
-            values = await ai.embed([text for _, text in items])
-            _save_vectors(job_id, token, dict(zip([key for key, _ in items], values, strict=True)))
+            values = await llm.embed_texts([text for _, text in items])
+            _persist_chunk_embeddings(
+                job_id, token, dict(zip([key for key, _ in items], values, strict=True))
+            )
             count_metric("embedding_provider_batch")
 
         for item in missing:
             item_size = token_count(item[1])
             if batch and (len(batch) == 64 or size + item_size > 32_000):
-                await save_batch(batch)
+                await embed_and_persist_batch(batch)
                 batch, size = [], 0
             batch.append(item)
             size += item_size
         if batch:
-            await save_batch(batch)
+            await embed_and_persist_batch(batch)
     finally:
-        await ai.close()
+        await llm.close()
 
 
-def _promote(job_id: str, token: int) -> None:
+def _activate_ready_version(job_id: str, token: int) -> None:
     """Mark a fully embedded version ready and enqueue its automatic insights.
 
     Advance the current-version pointer only when this version is at least as new.
@@ -335,25 +348,14 @@ def _promote(job_id: str, token: int) -> None:
     notify_change()
 
 
-def version_evidence(db, version_id: str) -> list[Evidence]:
+def load_document_version_evidence(db, version_id: str) -> list[Evidence]:
     """Load all chunks of a live, ready version as evidence in document order."""
     version = require_version(db, version_id, ready=True)
     chunks = db.scalars(select(Chunk).where(Chunk.version_id == version_id).order_by(Chunk.ordinal))
-    return [
-        Evidence(
-            id=chunk.id,
-            document_id=version.document_id,
-            version_id=version.id,
-            filename=version.filename,
-            version_number=version.version_number,
-            text=chunk.text,
-            location=chunk.location,
-        )
-        for chunk in chunks
-    ]
+    return [create_cited_evidence_record(chunk, version) for chunk in chunks]
 
 
-async def _insights(job_id: str, token: int, version_id: str) -> None:
+async def _create_document_insights(job_id: str, token: int, version_id: str) -> None:
     """Generate and persist full-document insights unless they are already complete.
 
     Recheck the job claim and source readiness before saving the provider result.
@@ -362,59 +364,59 @@ async def _insights(job_id: str, token: int, version_id: str) -> None:
         version = require_version(db, version_id, ready=True)
         if version.insight_status == "ready" and version.insights is not None:
             return
-    _set_stage(job_id, token, "insights")
+    _update_processing_stage(job_id, token, "insights")
     with session() as db:
-        evidence = version_evidence(db, version_id)
-    ai = create_ai(version_id)
+        evidence = load_document_version_evidence(db, version_id)
+    llm = create_llm_client(version_id)
     try:
-        data = await summarize(ai, evidence)
+        data = await generate_document_summary(llm, evidence)
     finally:
-        await ai.close()
+        await llm.close()
     with session() as db, db.begin():
         job_checkpoint(db, job_id, token)
         version = require_version(db, version_id, ready=True)
         version.insights, version.insight_status, version.insight_error = data, "ready", None
 
 
-async def _artifact(job_id: str, token: int, artifact_id: str) -> None:
+async def _generate_requested_artifact(job_id: str, token: int, artifact_id: str) -> None:
     """Generate a requested summary or comparison and persist it under the job claim.
 
     Reuse completed artifacts and recheck the artifact and sources before publication.
     """
     with session() as db:
-        artifact = _require_artifact(db, artifact_id)
+        artifact = _get_required_artifact(db, artifact_id)
         if artifact.status == "ready" and artifact.data is not None:
             return
-    _set_stage(job_id, token, "generating")
+    _update_processing_stage(job_id, token, "generating")
     with session() as db:
-        artifact = _require_artifact(db, artifact_id)
-        evidence = {id: version_evidence(db, id) for id in artifact.version_ids}
+        artifact = _get_required_artifact(db, artifact_id)
+        evidence = {id: load_document_version_evidence(db, id) for id in artifact.version_ids}
         options, kind = artifact.options, artifact.kind
-    ai = create_ai(artifact_id)
+    llm = create_llm_client(artifact_id)
     try:
         if kind == "summary":
             if len(evidence) != 1:
                 raise ValueError("A summary artifact requires exactly one document version.")
-            data = await summarize(
-                ai,
+            data = await generate_document_summary(
+                llm,
                 next(iter(evidence.values())),
                 length=options.get("length", "short"),
                 focus_areas=options.get("focus_areas"),
                 tone=options.get("tone", "neutral"),
             )
         elif kind == "comparison":
-            data = await compare(ai, evidence, options.get("dimensions", []))
+            data = await generate_document_comparison(llm, evidence, options.get("dimensions", []))
         else:
             raise ValueError("Unsupported artifact kind.")
     finally:
-        await ai.close()
+        await llm.close()
     with session() as db, db.begin():
         job_checkpoint(db, job_id, token)
-        artifact = _require_artifact(db, artifact_id)
+        artifact = _get_required_artifact(db, artifact_id)
         artifact.data, artifact.status, artifact.error = data, "ready", None
 
 
-def _cleanup(job_id: str, token: int, document_id: str) -> None:
+def _cleanup_deleted_document(job_id: str, token: int, document_id: str) -> None:
     """Remove files, chunks, and insights belonging to a logically deleted document.
 
     Cancel dependent artifacts and fence their active jobs while retaining metadata.
@@ -476,14 +478,14 @@ def _cleanup(job_id: str, token: int, document_id: str) -> None:
                 )
             )
         for version in versions:
-            storage_file(version.storage_key).unlink(missing_ok=True)
-            parsed_path(version.id).unlink(missing_ok=True)
-            parsed_path(version.id).with_suffix(".fingerprint").unlink(missing_ok=True)
+            resolve_storage_path(version.storage_key).unlink(missing_ok=True)
+            get_parsed_document_path(version.id).unlink(missing_ok=True)
+            get_parsed_document_path(version.id).with_suffix(".fingerprint").unlink(missing_ok=True)
             db.execute(delete(Chunk).where(Chunk.version_id == version.id))
             version.status, version.insights, version.insight_status = "deleted", None, "cancelled"
 
 
-async def process_job(job_id: str, token: int) -> None:
+async def process_document_job(job_id: str, token: int) -> None:
     """Dispatch a claimed job to ingestion, insights, artifact generation, or cleanup.
 
     Ingestion reuses parsed artifacts and vectors before publishing a complete index.
@@ -496,16 +498,16 @@ async def process_job(job_id: str, token: int) -> None:
         if version is None:
             raise ValueError("An ingestion job requires a document version.")
         if version.status != "ready":
-            _set_stage(job_id, token, "parsing")
-            parsed, fingerprint = _canonical(version)
-            _prepare_chunks(job_id, token, parsed, fingerprint)
-            await _embed_missing(job_id, token, version.id)
-        _promote(job_id, token)
+            _update_processing_stage(job_id, token, "parsing")
+            parsed, fingerprint = _load_or_parse_document(version)
+            _persist_document_chunks(job_id, token, parsed, fingerprint)
+            await _embed_missing_chunks(job_id, token, version.id)
+        _activate_ready_version(job_id, token)
     elif kind == "insights":
-        await _insights(job_id, token, resource_id)
+        await _create_document_insights(job_id, token, resource_id)
     elif kind in {"summary", "comparison"}:
-        await _artifact(job_id, token, resource_id)
+        await _generate_requested_artifact(job_id, token, resource_id)
     elif kind == "cleanup":
-        _cleanup(job_id, token, resource_id)
+        _cleanup_deleted_document(job_id, token, resource_id)
     else:
         raise ValueError("Unsupported job kind.")

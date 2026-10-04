@@ -17,8 +17,9 @@ from sqlalchemy import create_engine, func, select, text
 
 from docvault import cache, config, jobs, processing
 from docvault import db as database
-from docvault.ai.insights import DocumentInsights, KeyInsight
-from docvault.ai.provider import ProviderError
+from docvault.llm.insights import DocumentInsights, KeyInsight
+from docvault.llm.provider import ProviderError
+from docvault.llm.types import ParsedChunk, ParsedDocument
 from docvault.models import Artifact, Chat, Chunk, Document, Job, JobAttempt, Message, Version, now
 
 pytestmark = [
@@ -68,7 +69,7 @@ def seed_version(content="Payment is due in 30 days.", document_id=None, number=
             db.add(document)
             db.flush()
         key = f"sources/{uuid4()}.txt"
-        path = processing.storage_file(key)
+        path = processing.resolve_storage_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         version = Version(
@@ -89,7 +90,7 @@ def seed_version(content="Payment is due in 30 days.", document_id=None, number=
         return document.id, version.id, job.id
 
 
-class FakeAI:
+class FakeLLM:
     context_tokens = 128000
     max_output_tokens = 4096
 
@@ -98,13 +99,13 @@ class FakeAI:
         self.fail_call = fail_call
         self.generations = 0
 
-    async def embed(self, texts):
+    async def embed_texts(self, texts):
         self.batches.append(texts)
         if len(self.batches) == self.fail_call:
             raise ProviderError("Temporary provider failure.", retryable=True)
         return [[1.0] + [0.0] * 1535 for _ in texts]
 
-    async def structured(self, schema, messages):
+    async def generate_structured_response(self, schema, messages):
         import json
 
         self.generations += 1
@@ -124,8 +125,8 @@ class FakeAI:
 
 
 def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated_db, monkeypatch):
-    ai = FakeAI()
-    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
+    llm = FakeLLM()
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     document_id, version_id, job_id = seed_version()
     jobs.run_job(job_id)
     jobs.run_job(job_id)  # Duplicate queue delivery must not make a second provider call.
@@ -140,8 +141,8 @@ def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated
         )
         assert insight_job.status == "queued" and version.insight_status == "pending"
         insight_job_id = insight_job.id
-    assert len(ai.batches) == 1
-    assert processing.parsed_path(version_id).exists()
+    assert len(llm.batches) == 1
+    assert processing.get_parsed_document_path(version_id).exists()
     jobs.run_job(insight_job_id)
     with database.session() as db:
         version = db.get(Version, version_id)
@@ -151,21 +152,21 @@ def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated
     with database.session() as db, db.begin():
         db.get(Job, insight_job_id).status = "queued"
     jobs.run_job(insight_job_id)
-    assert ai.generations == 1
+    assert llm.generations == 1
 
 
 def test_missing_artifact_is_rejected_before_provider_work(isolated_db, monkeypatch):
     def unexpected_provider(resource):
         pytest.fail("A missing artifact must not start provider work.")
 
-    monkeypatch.setattr(processing, "create_ai", unexpected_provider)
+    monkeypatch.setattr(processing, "create_llm_client", unexpected_provider)
     with pytest.raises(jobs.SourceDeleted, match="artifact no longer exists"):
-        asyncio.run(processing._artifact(str(uuid4()), 1, str(uuid4())))
+        asyncio.run(processing._generate_requested_artifact(str(uuid4()), 1, str(uuid4())))
 
 
 def test_summary_artifact_persists_after_guarded_lookups(isolated_db, monkeypatch):
-    ai = FakeAI()
-    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
+    llm = FakeLLM()
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     _, version_id, ingest_job_id = seed_version()
     jobs.run_job(ingest_job_id)
     with database.session() as db, db.begin():
@@ -184,13 +185,18 @@ def test_summary_artifact_persists_after_guarded_lookups(isolated_db, monkeypatc
         assert artifact.data["summary"] == "Payment is due in 30 days."
         job = db.get(Job, job_id)
         assert job is not None and job.status == "complete"
-    assert ai.generations == 1
+    assert llm.generations == 1
 
 
 def test_retry_reuses_completed_embedding_batches(isolated_db, monkeypatch):
-    ai = FakeAI(fail_call=2)
-    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
-    content = "\n\n".join(f"Section {index}: invoice reference ABC-{index}." for index in range(70))
+    llm = FakeLLM(fail_call=2)
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
+    # Distinct headings prevent native peer merging, so this crosses the 64-input batch boundary.
+    content = "\n\n".join(
+        f"# Section {index}\n"
+        + (f"Invoice reference ABC-{index} is due in thirty days. " * 40)
+        for index in range(70)
+    )
     _, version_id, job_id = seed_version(content)
     jobs.run_job(job_id)
     with database.session() as db, db.begin():
@@ -212,11 +218,49 @@ def test_retry_reuses_completed_embedding_batches(isolated_db, monkeypatch):
             )
         )
         assert [attempt.status for attempt in attempts] == ["failed", "complete"]
-    assert [len(batch) for batch in ai.batches] == [64, 6, 6]
+    assert [len(batch) for batch in llm.batches] == [64, 6, 6]
+
+
+def test_chunker_upgrade_reparses_old_cached_artifacts(isolated_db, monkeypatch):
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: FakeLLM())
+    _, version_id, job_id = seed_version()
+    with database.session() as db:
+        version = db.get(Version, version_id)
+        old_fingerprint = cache.calculate_json_fingerprint(
+            {
+                "sha256": version.sha256,
+                "filename": version.filename,
+                "parser": "utf8-v1",
+                "chunker": "structure-600-v1",
+                "ocr": "rapidocr-english-torch",
+            }
+        )
+        new_fingerprint = processing.calculate_parser_fingerprint(version)
+    old_artifact = ParsedDocument(
+        text="Old cached artifact.",
+        chunks=[
+            ParsedChunk(
+                text="Old cached artifact.",
+                embedding_text="Old cached artifact.",
+                location={"kind": "txt", "char_start": 0, "char_end": 20},
+                token_count=4,
+            )
+        ],
+        page_count=None,
+        parser="utf8-v1",
+    )
+    processing._persist_parsed_document(version_id, old_artifact, old_fingerprint, 0)
+    assert processing._load_cached_parsed_document(version_id, new_fingerprint) is None
+    jobs.run_job(job_id)
+    refreshed = processing._load_cached_parsed_document(version_id, new_fingerprint)
+    assert refreshed is not None and refreshed.text == "Payment is due in 30 days."
+    with database.session() as db:
+        assert db.get(Version, version_id).status == "ready"
+        assert all("Old cached" not in text for text in db.scalars(select(Chunk.text)))
 
 
 def test_older_completed_version_does_not_replace_newer_ready_version(isolated_db, monkeypatch):
-    monkeypatch.setattr(processing, "create_ai", lambda resource: FakeAI())
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: FakeLLM())
     document_id, first_id, first_job = seed_version("Old payment term is 30 days.")
     _, second_id, second_job = seed_version("New payment term is 45 days.", document_id, 2)
     jobs.run_job(second_job)
@@ -238,14 +282,14 @@ def test_expired_claim_is_fenced_before_recovery_dispatch(isolated_db, monkeypat
 
     monkeypatch.setattr(jobs, "Queue", Queue)
     _, _, job_id = seed_version()
-    old_token = jobs._claim(job_id)
+    old_token = jobs._claim_pending_job(job_id)
     with database.session() as db, db.begin():
         db.get(Job, job_id).lease_until = now() - timedelta(seconds=1)
-    assert jobs.dispatch_once() == 1
+    assert jobs.dispatch_pending_jobs() == 1
     assert len(published) == 1
     with database.session() as db, db.begin(), pytest.raises(jobs.LostClaim):
         jobs.job_checkpoint(db, job_id, old_token)
-    new_token = jobs._claim(job_id)
+    new_token = jobs._claim_pending_job(job_id)
     assert new_token > old_token
     with database.session() as db, db.begin():
         assert jobs.job_checkpoint(db, job_id, new_token).attempts == 2
@@ -255,16 +299,16 @@ def test_deleted_source_cannot_publish_embedding_and_cleanup_removes_owned_files
     isolated_db, monkeypatch
 ):
     document_id, version_id, job_id = seed_version()
-    ai = FakeAI()
-    original = ai.embed
+    llm = FakeLLM()
+    original = llm.embed_texts
 
     async def delete_during_embed(texts):
         with database.session() as db, db.begin():
             db.get(Document, document_id).deleted_at = now()
         return await original(texts)
 
-    ai.embed = delete_during_embed
-    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
+    llm.embed_texts = delete_during_embed
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     jobs.run_job(job_id)
     with database.session() as db, db.begin():
         assert db.get(Job, job_id).status == "cancelled"
@@ -282,22 +326,22 @@ def test_deleted_source_cannot_publish_embedding_and_cleanup_removes_owned_files
             db.scalar(select(func.count()).select_from(Chunk).where(Chunk.version_id == version_id))
             == 0
         )
-    assert not processing.storage_file(key).exists()
-    assert not processing.parsed_path(version_id).exists()
+    assert not processing.resolve_storage_path(key).exists()
+    assert not processing.get_parsed_document_path(version_id).exists()
 
 
 def test_heartbeat_keeps_a_slow_runner_claimed(isolated_db, monkeypatch):
     monkeypatch.setenv("LEASE_SECONDS", "2")
     config.get_settings.cache_clear()
-    ai = FakeAI()
-    original = ai.embed
+    llm = FakeLLM()
+    original = llm.embed_texts
 
     async def slow_embedding(texts):
         time.sleep(3)
         return await original(texts)
 
-    ai.embed = slow_embedding
-    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
+    llm.embed_texts = slow_embedding
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     _, version_id, job_id = seed_version()
     jobs.run_job(job_id)
     with database.session() as db:
@@ -307,7 +351,7 @@ def test_heartbeat_keeps_a_slow_runner_claimed(isolated_db, monkeypatch):
 
 def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
     _, _, job_id = seed_version()
-    token = jobs._claim(job_id)
+    token = jobs._claim_pending_job(job_id)
     assert token is not None
     with database.session() as db, db.begin():
         job = db.get(Job, job_id)
@@ -325,7 +369,7 @@ def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
             return self.waits > 1
 
     stop = ControlledStop()
-    jobs._heartbeat(job_id, token, stop)
+    jobs._renew_job_lease(job_id, token, stop)
     assert stop.waits == 1
     with database.session() as db:
         job = db.get(Job, job_id)
@@ -333,13 +377,13 @@ def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
 
 
 def test_only_transient_failures_retry_and_stop_after_three_attempts(isolated_db, monkeypatch):
-    ai = FakeAI()
+    llm = FakeLLM()
 
     async def broken_embedding(texts):
         raise ProviderError("Temporary provider failure.", retryable=True)
 
-    ai.embed = broken_embedding
-    monkeypatch.setattr(processing, "create_ai", lambda resource: ai)
+    llm.embed_texts = broken_embedding
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     _, version_id, job_id = seed_version()
     for _ in range(3):
         jobs.run_job(job_id)
@@ -361,10 +405,10 @@ def test_real_rq_delivery_executes_claimed_job(isolated_db, monkeypatch):
     name = "docvault-test-" + uuid4().hex
     queue = Queue(name, connection=connection)
     monkeypatch.setattr(jobs, "Queue", lambda *args, **kwargs: queue)
-    monkeypatch.setattr(processing, "create_ai", lambda resource: FakeAI())
+    monkeypatch.setattr(processing, "create_llm_client", lambda resource: FakeLLM())
     _, version_id, job_id = seed_version()
     try:
-        assert jobs.dispatch_once() == 1
+        assert jobs.dispatch_pending_jobs() == 1
         assert queue.count == 1
         worker = SimpleWorker([queue], connection=connection)
         worker.work(burst=True, logging_level="WARNING")
@@ -394,7 +438,7 @@ def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(
         db.add_all([old_message, live_message])
         db.flush()
         old_id, live_id, old_chat_id = old_message.id, live_message.id, old_chat.id
-    assert jobs.dispatch_once() == 0
+    assert jobs.dispatch_pending_jobs() == 0
     assert notifications == [True]
     with database.session() as db, db.begin():
         assert db.get(Message, old_id).status == "failed"
@@ -403,5 +447,5 @@ def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(
         # The stale generation no longer occupies the partial unique constraint.
         db.add(Message(chat_id=old_chat_id, role="assistant", status="pending"))
     # With nothing stale or queued, an empty RETURNING result causes no update event.
-    assert jobs.dispatch_once() == 0
+    assert jobs.dispatch_pending_jobs() == 0
     assert notifications == [True]

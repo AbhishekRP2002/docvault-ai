@@ -47,7 +47,7 @@ export function Analytics() {
       <PageHeading
         eyebrow="Workspace overview"
         title="A little perspective"
-        description="Document activity, processing health, and AI usage."
+        description="Document activity, processing health, and LLM usage."
       >
         <Button variant="outline" onClick={refresh}>
           <RefreshCw />
@@ -78,7 +78,7 @@ export function Analytics() {
             detail: "Original document storage",
           },
           {
-            label: "AI requests",
+            label: "LLM requests",
             icon: Activity,
             value: usageMetrics && number(usageMetrics.requests),
             detail: usageMetrics
@@ -86,7 +86,7 @@ export function Analytics() {
               : "Provider requests",
           },
           {
-            label: "Reported AI cost",
+            label: "Reported LLM cost",
             icon: Coins,
             value:
               usageMetrics &&
@@ -182,7 +182,7 @@ export function Analytics() {
           </div>
         </section>
         <section className="rounded-xl border bg-card p-6">
-          <h2 className="font-semibold">AI usage</h2>
+          <h2 className="font-semibold">LLM usage</h2>
           <p className="mt-1 text-xs text-muted-foreground">
             Tokens reported by your model provider.
           </p>

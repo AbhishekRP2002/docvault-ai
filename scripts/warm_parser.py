@@ -8,11 +8,12 @@ import argparse
 import json
 from pathlib import Path
 
-from docvault.ai.parsing import parse_file
-from docvault.ai.provider import token_count
+from docvault.llm.parsing import parse_document_file
+from docvault.llm.provider import token_count
 
 
 def main() -> None:
+    """Warm local parsing assets with a supplied document and print parser metadata only."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
     arguments = parser.parse_args()
@@ -22,7 +23,7 @@ def main() -> None:
         if arguments.path.suffix.lower() == ".pdf"
         else ("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     )
-    parsed = parse_file(arguments.path, mime, arguments.path.name)
+    parsed = parse_document_file(arguments.path, mime, arguments.path.name)
     print(
         json.dumps(
             {"parser": parsed.parser, "pages": parsed.page_count, "chunks": len(parsed.chunks)}

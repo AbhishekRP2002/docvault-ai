@@ -25,16 +25,16 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 @asynccontextmanager
-async def lifespan(app):
+async def initialize_application_storage(app):
     """Create the configured storage directory before the application serves requests."""
     get_settings().storage_path.mkdir(parents=True, exist_ok=True)
     yield
 
 
 app = FastAPI(
-    title="DocVault AI",
+    title="DocVault LLM",
     version="0.1.0",
-    lifespan=lifespan,
+    lifespan=initialize_application_storage,
     description="Local shared document workspace. IAM is deferred; use on localhost.",
 )
 app.add_middleware(
@@ -50,7 +50,7 @@ app.include_router(metrics.router)
 
 
 @app.exception_handler(AppError)
-async def app_error(request, exc):
+async def handle_application_error(request, exc):
     """Render an application error with its request ID and a retry header for HTTP 429."""
     headers = {"Retry-After": "60"} if exc.status == 429 else None
     return JSONResponse(
@@ -64,7 +64,7 @@ async def app_error(request, exc):
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error(request, exc):
+async def handle_request_validation_error(request, exc):
     """Return field-level validation errors without echoing submitted values."""
     # Do not echo inputs: they may contain document text or confidential questions.
     return JSONResponse(
@@ -85,7 +85,7 @@ async def validation_error(request, exc):
 
 
 @app.middleware("http")
-async def request_metrics(request: Request, call_next):
+async def record_request_metrics(request: Request, call_next):
     """Attach request IDs, record response-creation timing, and normalize unexpected errors."""
     request.state.request_id = str(uuid4())
     start = time.monotonic()
@@ -122,7 +122,7 @@ async def request_metrics(request: Request, call_next):
 
 
 @app.get("/v1/config", tags=["configuration"])
-def config():
+def get_public_configuration():
     """Expose selected model names and whether a provider key is configured, never the key."""
     settings = get_settings()
     return dict(
@@ -134,13 +134,13 @@ def config():
 
 
 @app.get("/health/live", tags=["health"])
-def live():
+def check_liveness():
     """Report that the API process can respond without checking its dependencies."""
     return {"status": "ok"}
 
 
 @app.get("/health/ready", tags=["health"])
-def ready():
+def check_readiness():
     """Check the migration table, Redis, worker heartbeat, and storage; return 503 if degraded."""
     checks = {}
     try:
@@ -163,9 +163,13 @@ def ready():
 
 
 @app.get("/metrics", response_class=PlainTextResponse, tags=["metrics"])
-def prometheus():
+def export_prometheus_metrics():
     """Render available workspace metrics as newline-delimited Prometheus samples."""
-    data = {**metrics.document_metrics(), **metrics.processing_metrics(), **metrics.usage_metrics()}
+    data = {
+        **metrics.get_document_metrics(),
+        **metrics.get_processing_metrics(),
+        **metrics.get_llm_usage_metrics(),
+    }
     return (
         "\n".join(f"docvault_{key} {value}" for key, value in data.items() if value is not None)
         + "\n"
@@ -173,7 +177,7 @@ def prometheus():
 
 
 @app.websocket("/v1/events")
-async def events(websocket: WebSocket):
+async def stream_workspace_events(websocket: WebSocket):
     """Reject disallowed origins, then emit Redis update hints and periodic snapshot revisions."""
     origin = websocket.headers.get("origin")
     if origin and origin not in get_settings().cors_origins:

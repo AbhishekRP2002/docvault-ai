@@ -5,16 +5,22 @@ import json
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 
-from docvault.ai.graphs import run_chat
-from docvault.ai.provider import ProviderError
-from docvault.ai.types import Answer, Evidence
-from docvault.cache import cache_get, cache_set, count_metric, notify_change, signature
+from docvault.cache import (
+    cache_get,
+    cache_set,
+    calculate_json_fingerprint,
+    count_metric,
+    notify_change,
+)
 from docvault.config import get_settings
 from docvault.db import session
 from docvault.documents import require_versions
 from docvault.errors import AppError
+from docvault.llm.graphs import run_document_chat_workflow
+from docvault.llm.provider import ProviderError
+from docvault.llm.types import Answer, Evidence
 from docvault.models import Chat, Message, now
-from docvault.retrieval import citation, retrieve
+from docvault.retrieval import build_public_citation, retrieve_relevant_chunks
 
 ACTIVE_TASKS: dict[str, asyncio.Task] = {}
 
@@ -30,7 +36,7 @@ def require_chat(db, chat_id: str, lock=False) -> Chat:
     return chat
 
 
-def message_response(message: Message) -> dict:
+def serialize_message_response(message: Message) -> dict:
     """Build the public message payload with status, sources, suggestions, and outcome."""
     return dict(
         id=message.id,
@@ -48,7 +54,7 @@ def message_response(message: Message) -> dict:
     )
 
 
-def visible_messages(db, chat_id: str) -> list[Message]:
+def load_visible_chat_messages(db, chat_id: str) -> list[Message]:
     """Return each user turn and its newest assistant attempt in chronological order."""
     messages = list(
         db.scalars(select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at))
@@ -57,14 +63,14 @@ def visible_messages(db, chat_id: str) -> list[Message]:
     return [m for m in messages if m.role == "user" or latest.get(m.parent_id) == m.id]
 
 
-def reserve_message(
+def reserve_assistant_response(
     chat_id: str, content: str | None, request_key: str, retry_of: str | None = None
 ):
     """Admit one assistant attempt with idempotency and ready-source checks.
 
     Return its ID and a replay flag; regeneration uses only the latest turn's original sources.
     """
-    fingerprint = signature([content, retry_of])
+    fingerprint = calculate_json_fingerprint([content, retry_of])
     request_key = f"retry:{retry_of}:{request_key}" if retry_of else f"new:{request_key}"
     with session() as db, db.begin():
         chat = require_chat(db, chat_id, lock=True)
@@ -151,14 +157,14 @@ def cancel_message(chat_id: str, message_id: str) -> dict:
             message.status = "cancelled"
             message.error = "Generation stopped. You can retry this response."
             message.updated_at = now()
-        result = message_response(message)
+        result = serialize_message_response(message)
     notify_change()
     if cancelled and (task := ACTIVE_TASKS.get(message_id)):
         task.cancel()
     return result
 
 
-def set_failed(message_id: str, error: str, status="failed") -> dict | None:
+def mark_message_failed(message_id: str, error: str, status="failed") -> dict | None:
     """Record failure or cancellation only while the message is still active.
 
     Return its persisted payload, or None if it no longer exists.
@@ -169,17 +175,17 @@ def set_failed(message_id: str, error: str, status="failed") -> dict | None:
             return None
         if message.status in {"pending", "streaming"}:
             message.status, message.error, message.updated_at = status, error, now()
-        result = message_response(message)
+        result = serialize_message_response(message)
     notify_change()
     return result
 
 
-async def generate_message(message_id: str, emit):
+async def generate_assistant_response(message_id: str, emit_generation_event):
     """Stream a reserved answer, validate it, and persist its canonical completion.
 
     Regeneration bypasses answer reuse; cancellation or deleted sources prevent late publication.
     """
-    from docvault.integrations import create_ai
+    from docvault.integrations import create_llm_client
 
     with session() as db, db.begin():
         message = db.get(Message, message_id, with_for_update=True)
@@ -190,29 +196,29 @@ async def generate_message(message_id: str, emit):
         user = db.get(Message, message.parent_id)
         history = [
             dict(role=m.role, content=m.content)
-            for m in visible_messages(db, message.chat_id)
+            for m in load_visible_chat_messages(db, message.chat_id)
             if m.created_at < user.created_at and m.status == "complete"
         ]
         # Retain persisted history; send recent turns without a fixed evidence-token budget.
         history = history[-20:]
         question, version_ids = user.content, list(message.version_ids)
         is_retry = message.request_key.startswith("retry:")
-    ai = create_ai(message_id)
+    llm = create_llm_client(message_id)
 
-    async def on_delta(value: str):
+    async def emit_response_delta(value: str):
         """Recheck active status, refresh its heartbeat, and emit a provisional text delta."""
         with session() as db, db.begin():
             current = db.get(Message, message_id)
             if not current or current.status != "streaming":
                 raise asyncio.CancelledError
             current.updated_at = now()
-        await emit("answer.delta", {"text": value})
+        await emit_generation_event("answer.delta", {"text": value})
 
     try:
         settings = get_settings()
         with session() as db:
             versions = require_versions(db, version_ids)
-            key = "answer:" + signature(
+            key = "answer:" + calculate_json_fingerprint(
                 [
                     "chat-v1",
                     [(v.id, v.sha256, v.embedding_model) for v in versions],
@@ -231,12 +237,12 @@ async def generate_message(message_id: str, emit):
             # A cache hit returns its completed result; do not pretend to stream model tokens.
         else:
 
-            async def find_evidence(query: str):
+            async def retrieve_turn_evidence(query: str):
                 """Retrieve evidence only from the versions captured by this assistant attempt."""
-                return await retrieve(query, version_ids, ai)
+                return await retrieve_relevant_chunks(query, version_ids, llm)
 
-            answer, evidence, rewritten = await run_chat(
-                question, history, find_evidence, ai, on_delta
+            answer, evidence, rewritten = await run_document_chat_workflow(
+                question, history, retrieve_turn_evidence, llm, emit_response_delta
             )
         selected = {item.id: item for item in evidence}
         with session() as db, db.begin():
@@ -247,11 +253,11 @@ async def generate_message(message_id: str, emit):
             current.content = answer.response
             current.suggestions = answer.suggestions
             current.citations = [
-                citation(selected[identifier]) for identifier in answer.citation_ids
+                build_public_citation(selected[identifier]) for identifier in answer.citation_ids
             ]
             current.outcome, current.rewritten_query = answer.outcome, rewritten
             current.status, current.updated_at = "complete", now()
-            result = message_response(current)
+            result = serialize_message_response(current)
         if not cached and answer.outcome == "answered":
             cache_set(
                 key,
@@ -262,13 +268,13 @@ async def generate_message(message_id: str, emit):
                 },
             )
         notify_change()
-        await emit("answer.completed", {"message": result})
+        await emit_generation_event("answer.completed", {"message": result})
     except asyncio.CancelledError:
-        result = set_failed(
+        result = mark_message_failed(
             message_id, "Generation stopped. You can retry this response.", "cancelled"
         )
         if result:
-            await emit("message.failed", {"message": result})
+            await emit_generation_event("message.failed", {"message": result})
         raise
     except Exception as exc:
         # Provider exceptions are sanitized at the boundary; don't expose arbitrary tracebacks.
@@ -277,19 +283,19 @@ async def generate_message(message_id: str, emit):
             if isinstance(exc, (AppError, ProviderError, ValueError))
             else "The response could not be completed. Please retry."
         )
-        result = set_failed(message_id, safe)
+        result = mark_message_failed(message_id, safe)
         if result:
-            await emit("message.failed", {"message": result})
+            await emit_generation_event("message.failed", {"message": result})
     finally:
-        await ai.close()
+        await llm.close()
 
 
-def encode_event(name: str, data: dict) -> str:
+def encode_sse_event(name: str, data: dict) -> str:
     """Encode a named SSE event with a JSON payload using API-compatible value conversion."""
     return f"event: {name}\ndata: {json.dumps(jsonable_encoder(data), ensure_ascii=False)}\n\n"
 
 
-async def message_events(message_id: str, replay=False):
+async def stream_message_events(message_id: str, replay=False):
     """Yield admission, response, and terminal SSE events for an assistant attempt.
 
     Replay stored terminal results; cancel a newly started local generation on disconnect.
@@ -297,30 +303,33 @@ async def message_events(message_id: str, replay=False):
     with session() as db:
         message = db.get(Message, message_id)
         user = db.get(Message, message.parent_id)
-        started = {"message": message_response(message), "user_message": message_response(user)}
+        started = {
+            "message": serialize_message_response(message),
+            "user_message": serialize_message_response(user),
+        }
         status = message.status
-    yield encode_event("message.started", started)
+    yield encode_sse_event("message.started", started)
     if replay:
         if status == "complete":
-            yield encode_event("answer.completed", {"message": started["message"]})
+            yield encode_sse_event("answer.completed", {"message": started["message"]})
         elif status in {"failed", "cancelled"}:
-            yield encode_event("message.failed", {"message": started["message"]})
+            yield encode_sse_event("message.failed", {"message": started["message"]})
         # Active replay doesn't start another generation. Client recovers via GET history.
         return
     queue = asyncio.Queue()
 
-    async def emit(name, payload):
+    async def enqueue_response_event(name, payload):
         """Queue a generation event for the SSE iterator to deliver."""
         await queue.put((name, payload))
 
-    async def run():
+    async def run_generation_and_close_queue():
         """Run generation and always signal the end of its event queue."""
         try:
-            await generate_message(message_id, emit)
+            await generate_assistant_response(message_id, enqueue_response_event)
         finally:
             await queue.put(None)
 
-    task = asyncio.create_task(run())
+    task = asyncio.create_task(run_generation_and_close_queue())
     ACTIVE_TASKS[message_id] = task
     try:
         while True:
@@ -331,7 +340,7 @@ async def message_events(message_id: str, replay=False):
                 continue
             if event is None:
                 break
-            yield encode_event(*event)
+            yield encode_sse_event(*event)
     finally:
         if not task.done():
             task.cancel()

@@ -1,4 +1,4 @@
-# DocVault AI implementation plan
+# DocVault LLM implementation plan
 
 Status: living implementation plan. Updated: 4 October 2026. Implementation exists; remaining acceptance gates are tracked explicitly below and in progress.md.
 
@@ -13,13 +13,15 @@ The feature-by-feature implementation ledger is [progress.md](progress.md). It i
 | Workstream | Status | Evidence / remaining gate |
 |---|---|---|
 | Specification and research | Implemented | Approved LangGraph/RQ/OpenRouter decisions and all 18 bonuses retained. UI contract updated to the user's two-column reference. |
-| M0 provider/parser feasibility | Partially verified | Real embedding/structured-stream smoke; read-back parser log confirms four-page PDF and image-only OCR. Full corpus/resource benchmarks pending. |
-| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; 54 backend tests pass with database integration enabled; file-scoped processing Pyright check passes. All 157 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
+| M0 provider/parser feasibility | Partially verified | Earlier real embedding/structured-stream smoke; final native Docling checks confirm DOCX, four-page PDF (25 chunks) and image-only OCR content in chunks. Full corpus/resource benchmarks pending. |
+| M1-M3 backend/core | Implemented; partial acceptance verified | Ruff exit 0; 72 backend tests pass with database integration enabled, including real HNSW/migration checks; scoped jobs/processing/parsing/retrieval Pyright passes. All 172 Python backend functions/methods have docstrings. Live synthetic TXT upload/ready/streamed answer/history checked. Restart/fault matrix and full evaluation pending. |
 | M4 insights/customization | Implemented; partially verified | Structured analysis and summary artifact code plus deterministic tests. Live coverage/long-document review pending. |
 | M5 comparison/cache/quotas | Partially implemented | Comparison, scoped caches and reuse implemented. Daily budget reservations and full quota gates pending; DAILY_BUDGET_USD currently has no enforcement. |
 | M6 frontend | Implemented; browser validation pending | Two-column SaaS shell, Files, Usage, Agent/New Run/Past Runs. assistant-ui External Store Runtime integrates the Python SSE/history with thread/composer primitives, scroll-to-bottom, Radix icon tooltips and streaming MarkdownText. Typecheck/build and 32 transport/runtime/rendering tests pass. User chose manual browser validation. |
 | M6 realtime/operations | Partially implemented | Redis/WebSocket invalidation, SSE, metrics, worker heartbeat and readiness exist. Persistent revisions and complete reconnect/metrics checks pending. |
 | M7 evaluation/submission | Pending | Frozen evaluation corpus/results, performance benchmark, clean Compose reproduction and demo recording/walkthrough remain; AI_USAGE.md now records actual assistance. |
+
+Owned backend code uses `docvault.llm`, `OpenRouterLLM`, `LLMCall` and descriptive action names such as `retrieve_relevant_chunks`, `build_public_citation`, `_embed_missing_chunks` and `_create_document_insights`. Update imports, callbacks, scripts and tests together; retain stable API routes and JSON fields. Keep external provider names/URLs and the assignment-required `AI_USAGE.md` intact.
 
 Record actual commands and evidence in [progress.md](progress.md). Passing deterministic provider tests verifies application behavior, not model quality. No entire milestone or bonus is complete solely because its code exists.
 
@@ -52,8 +54,12 @@ src/docvault/
     health.py
   documents.py            # upload/version/status behavior
   processing.py           # stage functions and checkpoints
-  parsing.py              # Docling conversion and provenance normalization
-  chunking.py             # structure-aware chunk construction
+  llm/
+    parsing.py            # Docling conversion, HybridChunker, provenance adapter
+    provider.py           # OpenRouterLLM, structured responses/embeddings/usage
+    graphs.py             # grounded chat graph
+    insights.py           # summaries and comparisons
+    types.py              # structured response/evidence contracts
   retrieval.py            # scoped SQL retrieval, fusion, context assembly
   chat.py                 # sessions, mutable selection, retry/cancel, message lifecycle
   workflows.py            # compiled LangGraph ingestion/chat/analysis workflows
@@ -62,7 +68,6 @@ src/docvault/
   dispatcher.py           # publish and reconcile durable jobs
   worker.py               # RQ entry points and resource configuration
   storage.py              # local storage operations
-  ai.py                   # provider calls, schemas, usage capture
   cache.py                # explicit keys and Redis operations
   limits.py               # rate, resource, and budget admission
   telemetry.py            # structured logging and metrics
@@ -129,7 +134,8 @@ This is a responsibility map, not a requirement to create empty files up front. 
 - Commit accepted versions and durable jobs together. Implement dispatcher publication, worker database claim/lease/fencing, checkpoints, bounded retry decisions, and stale-job recovery.
 - Connect a compiled LangGraph ingestion workflow: canonical parsing -> source-aware chunks -> model-safe embedding microbatches -> staging index -> atomic ready activation. Re-run the graph using persisted application stage checkpoints and completed artifacts/batches after recovery. A missing LangGraph checkpointer does not provide automatic graph-state resume.
 - Keep byte/page upload safeguards, but add no whole-file extracted-token cap. Split every embedding input under the verified provider input limit and preserve complete source coverage.
-- Current parsing and chunk construction both live in `ai/parsing.py`: Docling converts PDF/DOCX and TXT is read directly; custom `chunk_blocks` uses a 600-token budget including filename/heading context, contiguous prose splits without overlap, row-based table splits with repeated headers, and compatible adjacent PDF/DOCX prose packing. It does not use Docling HybridChunker. Keep provenance through splits/merges; defer overlap and alternative chunkers to measured retrieval evaluation. `processing.py` persists chunks and embeds missing inputs.
+- Use Docling HybridChunker in `llm/parsing.py` for PDF/DOCX and structured TXT input, with existing tiktoken/OpenAITokenizer, metadata-inclusive 600-token inputs, library split/merge/table logic, repeated table headers and picture/OCR text serialization. Keep a small provenance adapter and preserve original TXT text/locators. Include the Docling core/chunker version in parser fingerprints. Verify Unicode/long text, headings, table coverage, OCR and source locations; existing ready versions stay immutable. `processing.py` persists chunks and embeds missing inputs.
+- Treat PDF/DOCX provenance as contributing item locations, not exact offsets for each token split. Reserve metadata capacity for Docling-core 2.99.0 table segments; reject impossible headings/header capacity explicitly. Keep TXT chunks as complete, exact original substrings, including restored whitespace.
 - Implement list/detail/version/content/status/retry endpoints, document deletion/cleanup, baseline statistics and processing-history APIs. Add batch membership/result records.
 - Persist original source locations and normalize PDF/DOCX/TXT citation locators. Reuse computed values through independently owned per-version artifacts/chunks so deletion cannot damage another live resource. Capture provider usage at the call boundary from the first billable call.
 
@@ -144,7 +150,7 @@ This is a responsibility map, not a requirement to create empty files up front. 
 **Build**
 
 - Create multiple named chat sessions with mutable selected ready versions. The UI selects logical documents and resolves their current ready snapshots. Implement `PATCH /v1/chats/{id}` with `{title?, version_ids?}`. Copy the selection/index fingerprints onto each message; future selection edits never rewrite historical or active turns. Add no maximum selected-version count.
-- Implement exact dense search through pgvector's SQLAlchemy `cosine_distance`, plus PostgreSQL lexical ranking, `calculate_rrf`, evidence packing, and citation resolution. The [official pgvector-python RRF example](https://github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py) supplies custom SQL, not an importable fusion method; retain the small application helper with consensus/empty-result/tie checks. Use native HNSW/IVFFlat indexes if the later filtered-recall/latency benchmark warrants approximate search; do not implement ANN algorithms in application code. The message's captured version/index filters belong inside SQL. Retrieve relevant chunks without a fixed evidence-token cap; reserve output room and handle actual provider context limits explicitly, with split processing or a clear narrowing error rather than silent truncation.
+- Implement native cosine HNSW dense search through pgvector's SQLAlchemy `cosine_distance`, plus PostgreSQL GIN/full-text ranking, `calculate_rrf`, evidence packing, and citation resolution. The [official pgvector-python RRF example](https://github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py) supplies custom SQL, not an importable fusion method; retain the small application helper with consensus/empty-result/tie checks. Create HNSW with `vector_cosine_ops`, `m=32`, `ef_construction=200`, and transaction-local `ef_search=200`/`iterative_scan=strict_order` (pgvector 0.8+). Leave plan choice to PostgreSQL; no exhaustive application fallback. Verify actual EXPLAIN index use, filtered recall/source exclusion, lexical rescue and transaction-local setting reset against real PostgreSQL. The message's captured version/index filters belong inside SQL. Retrieve relevant chunks without a fixed evidence-token cap; reserve output room and handle actual provider context limits explicitly, with split processing or a clear narrowing error rather than silent truncation.
 - Implement a compiled LangGraph chat workflow with SQL-loaded recent history, conditional standalone-question rewriting, retrieval, evidence-only generation, `Answer` validation, and final persistence. Return up to three suggestions with the same structured answer; support insufficient-evidence/clarification outcomes.
 - Persist message lifecycle and call usage; enforce one active generation per chat and idempotent submission. Recheck source deletion and the generation claim before answer commit.
 - Keep worker document/artifact lookups guarded and typed, reuse required-resource helpers, and narrow optional ingest versions before parsing. Verify missing artifacts cause cancellation before provider work, summary results persist, and Pyright reports zero diagnostics for `processing.py`; this is a file-scoped check, not a whole-repository typecheck claim.
@@ -153,7 +159,7 @@ This is a responsibility map, not a requirement to create empty files up front. 
 - Offer JSON and real SSE through the same chat service. Map internal `Answer.response`/`citation_ids` to frontend `Message.content`/resolved `citations`, preserving `suggestions` and `outcome`. Implement provisional deltas, validated canonical completion, interruptions, failed-call state, and status/history recovery.
 - Provide a CLI/API demo that uploads a fixture, waits for readiness, asks a question, follows up, and resolves a source citation.
 
-**Likely files:** `retrieval.py`, `chat.py`, `workflows.py`, `ai.py`, chat schemas/routes, prompt templates, message/chat migrations, `scripts/demo.py`, retrieval/stream integration tests.
+**Likely files:** `retrieval.py`, `chat.py`, `workflows.py`, `llm/provider.py`, chat schemas/routes, prompt templates, message/chat migrations, `scripts/demo.py`, retrieval/stream integration tests.
 
 **Gate:** the first end-to-end release works with OpenRouter; citations resolve exact source spans; history survives restarts; a follow-up resolves correctly; absent evidence causes abstention; injection text cannot alter source selection; no completion event precedes commit. Test independent sessions, selection changes between/during turns, model-window overflow, repeated idempotency keys, cancellation versus late completion, and explicit retry/regeneration. No accidental duplicate run occurs, and the one-active-run guard does not disable later retries. Run and record the first retrieval/grounding evaluation.
 
@@ -184,7 +190,7 @@ This is a responsibility map, not a requirement to create empty files up front. 
 - Add atomic Redis rate limiting and database resource/budget reservations. Reconcile usage after timeout/crash, including unknown provider outcomes. Add the usage API and configured versioned price table.
 - Optimize bulk enqueue, embedding batch size, and bounded concurrency. Reuse unchanged contextualized embedding inputs between versions. Verify the document-current-pointer race.
 
-**Likely files:** retrieval/chat/insight extensions, comparison routes, `cache.py`, `limits.py`, AI usage/budget migrations, metrics routes, concurrency and cache tests.
+**Likely files:** retrieval/chat/insight extensions, comparison routes, `cache.py`, `limits.py`, LLM usage/budget migrations, metrics routes, concurrency and cache tests.
 
 **Gate:** at least one question needs both selected sources; comparison cells have the right source/version; absence is not inferred as agreement; changed versions/history cannot reuse stale answers; changed selections cannot reuse an answer grounded in different sources; concurrent calls cannot exceed reserved budgets. Repeat a request and show measured provider calls avoided. Batch and version tests demonstrate reuse without losing provenance.
 
@@ -217,7 +223,7 @@ This is a responsibility map, not a requirement to create empty files up front. 
 - Fix failures introduced by the implementation and rerun the relevant checks. Change retrieval/chunk/model settings only against identified failure cases; preserve the frozen acceptance set.
 - Run the recovery, selected-source, session, and retry matrix below with real PostgreSQL/Redis and deterministic provider faults. Run a separate small OpenRouter smoke for actual model integration. Do not claim IAM or tenant isolation as implemented.
 - The workspace's `AGENTS.md` asks to confirm before driving UI validation. Prepare the runnable UI and checks first, then confirm whether the user prefers agent-driven browser verification or manual validation; report UI behavior as unverified until one is completed.
-- Benchmark 10k chunks and five concurrent chats. Add HNSW only if exact retrieval misses the latency target; compare filtered recall against exact search before accepting it.
+- Benchmark 10k chunks and five concurrent chats. HNSW is now selected; compare its filtered recall against an exact SQL control and measure latency before claiming production performance.
 - Complete README setup, architecture, environment variables, API/curl examples, limits, prompt rationale, operational recovery, and known tradeoffs. Complete `AI_USAGE.md` with actual examples of assistance, corrections, and verification; invent no time-saving numbers.
 - Write `docs/demo.md` and produce the required demo recording or live walkthrough. Document a clean reset and reseed process. A public deployment, if requested, needs a concrete hosting target and its configuration.
 

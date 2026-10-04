@@ -60,6 +60,13 @@ class Chunk(Base):
     __table_args__ = (
         UniqueConstraint("version_id", "ordinal"),
         Index("ix_chunks_search", "search", postgresql_using="gin"),
+        Index(
+            "ix_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 32, "ef_construction": 200},
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     version_id: Mapped[str] = mapped_column(
@@ -158,8 +165,8 @@ class Message(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
-class AICall(Base):
-    __tablename__ = "ai_calls"
+class LLMCall(Base):
+    __tablename__ = "llm_calls"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     resource_id: Mapped[str | None] = mapped_column(String(36), index=True)
     model: Mapped[str]

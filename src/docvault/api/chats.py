@@ -8,18 +8,18 @@ from sqlalchemy import select
 from docvault.cache import notify_change
 from docvault.chat import (
     cancel_message,
-    generate_message,
-    message_events,
-    message_response,
+    generate_assistant_response,
+    load_visible_chat_messages,
     require_chat,
-    reserve_message,
-    visible_messages,
+    reserve_assistant_response,
+    serialize_message_response,
+    stream_message_events,
 )
 from docvault.config import get_settings
 from docvault.db import session
 from docvault.documents import require_versions
 from docvault.errors import AppError
-from docvault.limits import enforce_rate
+from docvault.limits import enforce_request_rate_limit
 from docvault.models import Chat, Message, now
 from docvault.schemas import ChatCreate, ChatUpdate, MessageCreate
 
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/v1/chats", tags=["chats"])
 RequestKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
 
-def chat_response(chat):
+def serialize_chat_response(chat):
     """Serialize a chat's identity, selected versions, and timestamps for the API."""
     return dict(
         id=chat.id,
@@ -39,12 +39,12 @@ def chat_response(chat):
 
 
 @router.get("")
-def chats():
+def list_chat_sessions():
     """Return all persisted chat sessions, most recently updated first."""
     with session() as db:
         return {
             "items": [
-                chat_response(chat)
+                serialize_chat_response(chat)
                 for chat in db.scalars(select(Chat).order_by(Chat.updated_at.desc()))
             ]
         }
@@ -58,7 +58,7 @@ def create_chat(body: ChatCreate):
         chat = Chat(title=body.title.strip() or "New chat", version_ids=[v.id for v in versions])
         db.add(chat)
         db.flush()
-        return chat_response(chat)
+        return serialize_chat_response(chat)
 
 
 @router.patch("/{chat_id}")
@@ -74,7 +74,7 @@ def update_chat(chat_id: str, body: ChatUpdate):
             # Running turns already hold an immutable scope snapshot.
             chat.version_ids = [v.id for v in require_versions(db, body.version_ids)]
         chat.updated_at = now()
-        result = chat_response(chat)
+        result = serialize_chat_response(chat)
     notify_change()
     return result
 
@@ -99,25 +99,30 @@ def delete_chat(chat_id: str):
 
 
 @router.get("/{chat_id}/messages")
-def history(chat_id: str):
+def get_chat_history(chat_id: str):
     """Return chronological chat history with only the latest assistant attempt per turn."""
     with session() as db:
         require_chat(db, chat_id)
-        return {"items": [message_response(m) for m in visible_messages(db, chat_id)]}
+        return {
+            "items": [
+                serialize_message_response(message)
+                for message in load_visible_chat_messages(db, chat_id)
+            ]
+        }
 
 
 @router.get("/{chat_id}/messages/{message_id}")
-def message(chat_id: str, message_id: str):
+def get_chat_message(chat_id: str, message_id: str):
     """Return one persisted message, rejecting IDs outside the requested chat."""
     with session() as db:
         require_chat(db, chat_id)
         item = db.get(Message, message_id)
         if not item or item.chat_id != chat_id:
             raise AppError(404, "message_not_found", "Message not found.")
-        return message_response(item)
+        return serialize_message_response(item)
 
 
-async def respond(
+async def _respond_to_chat_request(
     request: Request,
     chat_id: str,
     content: str | None,
@@ -132,42 +137,42 @@ async def respond(
             "provider_not_configured",
             "Set OPENROUTER_API_KEY on the backend before asking questions.",
         )
-    enforce_rate("chat", settings.chat_rate_per_minute, 60)
-    identifier, replay = reserve_message(chat_id, content, key or str(uuid4()), retry_of)
+    enforce_request_rate_limit("chat", settings.chat_rate_per_minute, 60)
+    identifier, replay = reserve_assistant_response(chat_id, content, key or str(uuid4()), retry_of)
     if "text/event-stream" in request.headers.get("accept", ""):
         return StreamingResponse(
-            message_events(identifier, replay),
+            stream_message_events(identifier, replay),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     if not replay:
 
-        async def ignore_event(name, payload):
+        async def _discard_generation_event(name, payload):
             """Discard generation events when the caller requested a single JSON response."""
             pass
 
-        await generate_message(identifier, ignore_event)
+        await generate_assistant_response(identifier, _discard_generation_event)
     with session() as db:
-        return message_response(db.get(Message, identifier))
+        return serialize_message_response(db.get(Message, identifier))
 
 
 @router.post("/{chat_id}/messages")
-async def ask(
+async def ask_document_question(
     chat_id: str, body: MessageCreate, request: Request, idempotency_key: RequestKey = None
 ):
     """Generate or replay a reply to a new question using the requested response format."""
-    return await respond(request, chat_id, body.content, idempotency_key)
+    return await _respond_to_chat_request(request, chat_id, body.content, idempotency_key)
 
 
 @router.post("/{chat_id}/messages/{message_id}/retry")
-async def retry(
+async def retry_assistant_response(
     chat_id: str, message_id: str, request: Request, idempotency_key: RequestKey = None
 ):
     """Regenerate the latest turn using its pinned sources, or replay the idempotent request."""
-    return await respond(request, chat_id, None, idempotency_key, message_id)
+    return await _respond_to_chat_request(request, chat_id, None, idempotency_key, message_id)
 
 
 @router.post("/{chat_id}/messages/{message_id}/cancel")
-async def cancel(chat_id: str, message_id: str):
+async def cancel_assistant_response(chat_id: str, message_id: str):
     """Stop an active assistant response, returning its state without altering finished replies."""
     return cancel_message(chat_id, message_id)

@@ -18,7 +18,7 @@ def redis_client() -> Redis:
     return Redis.from_url(get_settings().redis_url, socket_connect_timeout=2, socket_timeout=2)
 
 
-def signature(value) -> str:
+def calculate_json_fingerprint(value) -> str:
     """Hash a JSON-serializable value deterministically using sorted object keys."""
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False).encode()

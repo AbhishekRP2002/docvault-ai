@@ -21,10 +21,11 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import make_url
 
 from docvault import cache, integrations
-from docvault.ai.types import Answer
 from docvault.config import get_settings
 from docvault.db import Base, get_engine, session
-from docvault.models import Chat, Chunk, Document, Job, Message, Version, now
+from docvault.integrations import create_llm_client
+from docvault.llm.types import Answer
+from docvault.models import Chat, Chunk, Document, Job, LLMCall, Message, Version, now
 
 pytestmark = pytest.mark.integration
 
@@ -52,21 +53,21 @@ class MemoryRedis:
         return 0
 
 
-class FakeAI:
+class FakeLLM:
     def __init__(self):
         self.calls = []
         self.block = False
         self.started = threading.Event()
         self.release = threading.Event()
 
-    async def embed(self, inputs):
+    async def embed_texts(self, inputs):
         return [[1.0] + [0.0] * 1535 for _ in inputs]
 
-    async def structured(self, schema, messages):
+    async def generate_structured_response(self, schema, messages):
         payload = json.loads(messages[-1]["content"])
         return schema(question=payload["question"], needs_clarification=False, clarification="")
 
-    async def stream_answer(self, messages, on_delta):
+    async def stream_structured_answer(self, messages, on_delta):
         payload = json.loads(messages[-1]["content"])
         self.calls.append(payload)
         self.started.set()
@@ -121,16 +122,16 @@ def api(test_database_url, monkeypatch, tmp_path):
     monkeypatch.setenv("UPLOAD_RATE_PER_HOUR", "0")
     monkeypatch.setenv("DAILY_BUDGET_USD", "0")
     redis = MemoryRedis()
-    provider = FakeAI()
+    provider = FakeLLM()
     monkeypatch.setattr(cache, "redis_client", lambda: redis)
-    monkeypatch.setattr(integrations, "create_ai", lambda resource_id=None: provider)
+    monkeypatch.setattr(integrations, "create_llm_client", lambda resource_id=None: provider)
     engine = get_engine()
     try:
         Base.metadata.create_all(engine)
         from docvault.main import app
 
         with TestClient(app) as client:
-            yield SimpleNamespace(client=client, ai=provider, storage=tmp_path)
+            yield SimpleNamespace(client=client, llm=provider, storage=tmp_path)
     finally:
         provider.release.set()
         engine.dispose()
@@ -302,14 +303,14 @@ def test_cited_chat_and_idempotency_read_back_persisted_history(api):
     assert message["citations"][0]["chunk_id"] == source.chunk
     assert message["suggestions"] == ["What is the renewal date?"]
     assert ask(api, chat, key="same-message").json() == message
-    assert len(api.ai.calls) == 1
+    assert len(api.llm.calls) == 1
     assert ask(api, chat, question="Different question", key="same-message").status_code == 409
     history = api.client.get(f"/v1/chats/{chat}/messages").json()["items"]
     assert [m["role"] for m in history] == ["user", "assistant"]
     assert history[-1] == message
     assert api.client.get(f"/v1/chats/{chat}/messages/{message['id']}").json() == message
-    citation = api.client.get(f"/v1/versions/{source.version}/chunks/{source.chunk}")
-    assert citation.status_code == 200 and citation.json()["quote"] == source.text
+    build_public_citation = api.client.get(f"/v1/versions/{source.version}/chunks/{source.chunk}")
+    assert build_public_citation.status_code == 200 and build_public_citation.json()["quote"] == source.text
 
 
 def test_sse_contains_real_deltas_then_the_persisted_frontend_message(api):
@@ -351,12 +352,12 @@ def test_retry_keeps_original_sources_after_selection_edit_and_hides_old_attempt
     assert retried["id"] != first["id"] and retried["parent_id"] == first["parent_id"]
     assert retried["version_ids"] == [original.version]
     assert retried["citations"][0]["version_id"] == original.version
-    assert len(api.ai.calls) == 2, "Regeneration must bypass completed-answer reuse."
+    assert len(api.llm.calls) == 2, "Regeneration must bypass completed-answer reuse."
     assert (
         api.client.post(retry_path, headers={"Idempotency-Key": "explicit-regeneration"}).json()
         == retried
     )
-    assert len(api.ai.calls) == 2
+    assert len(api.llm.calls) == 2
     history = api.client.get(f"/v1/chats/{chat}/messages").json()["items"]
     assert len(history) == 2 and history[-1]["id"] == retried["id"]
     assert api.client.get(f"/v1/chats/{chat}/messages/{first['id']}").json() == first
@@ -401,7 +402,7 @@ def test_deleted_source_cannot_be_retrieved_or_reused_for_a_new_answer(api):
     assert api.client.get(f"/v1/versions/{source.version}/chunks/{source.chunk}").status_code == 404
     unavailable = ask(api, chat)
     assert unavailable.status_code == 404, unavailable.text
-    assert len(api.ai.calls) == 1
+    assert len(api.llm.calls) == 1
     history = api.client.get(f"/v1/chats/{chat}/messages").json()["items"]
     assert history[-1]["content"] == answer["content"]
     with session() as db:
@@ -411,38 +412,38 @@ def test_deleted_source_cannot_be_retrieved_or_reused_for_a_new_answer(api):
 def test_overlapping_requests_admit_only_one_generation(api):
     source = ready_source()
     chat = create_chat(api, [source])
-    api.ai.block = True
+    api.llm.block = True
     with ThreadPoolExecutor(max_workers=2) as pool:
         running = pool.submit(ask, api, chat, key="first-running")
         try:
-            assert api.ai.started.wait(5), "First generation never reached the provider."
+            assert api.llm.started.wait(5), "First generation never reached the provider."
             conflict = pool.submit(ask, api, chat, key="second-running").result(timeout=5)
             assert conflict.status_code == 409, conflict.text
             assert conflict.json()["error"]["code"] == "generation_active"
         finally:
-            api.ai.release.set()
+            api.llm.release.set()
         assert running.result(timeout=5).json()["status"] == "complete"
     with session() as db:
         assert db.scalar(select(func.count()).select_from(Message)) == 2
-    assert len(api.ai.calls) == 1
+    assert len(api.llm.calls) == 1
 
 
 def test_cancel_fences_active_answer_and_allows_explicit_retry(api):
     source = ready_source()
     chat = create_chat(api, [source])
-    api.ai.block = True
+    api.llm.block = True
     with ThreadPoolExecutor(max_workers=1) as pool:
         running = pool.submit(ask, api, chat)
         try:
-            assert api.ai.started.wait(5)
+            assert api.llm.started.wait(5)
             history = api.client.get(f"/v1/chats/{chat}/messages").json()["items"]
             active = history[-1]["id"]
             cancelled = api.client.post(f"/v1/chats/{chat}/messages/{active}/cancel")
             assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
         finally:
-            api.ai.release.set()
+            api.llm.release.set()
         assert running.result(timeout=5).json()["status"] == "cancelled"
-    api.ai.block = False
+    api.llm.block = False
     retry = api.client.post(
         f"/v1/chats/{chat}/messages/{active}/retry", headers={"Idempotency-Key": "after-cancel"}
     )
@@ -454,15 +455,15 @@ def test_cancel_fences_active_answer_and_allows_explicit_retry(api):
 def test_deletion_during_generation_prevents_a_completed_answer(api):
     source = ready_source()
     chat = create_chat(api, [source])
-    api.ai.block = True
+    api.llm.block = True
     with ThreadPoolExecutor(max_workers=1) as pool:
         running = pool.submit(ask, api, chat)
         try:
-            assert api.ai.started.wait(5)
+            assert api.llm.started.wait(5)
             deleted = api.client.delete(f"/v1/documents/{source.document}")
             assert deleted.status_code in {202, 204}
         finally:
-            api.ai.release.set()
+            api.llm.release.set()
         result = running.result(timeout=5).json()
     assert result["status"] == "failed" and result["citations"] == []
     assert api.client.get(f"/v1/chats/{chat}/messages/{result['id']}").json()["status"] == "failed"
@@ -527,3 +528,40 @@ def test_selection_counts_are_not_limited_to_old_chat_or_comparison_caps(api):
         json={"version_ids": [source.version for source in sources[:5]], "dimensions": ["Terms"]},
     )
     assert comparison.status_code == 202, comparison.text
+
+
+def test_llm_client_usage_is_persisted_and_read_by_usage_metrics(api):
+    async def record_usage():
+        llm = create_llm_client("usage-test-resource")
+        try:
+            await llm.record_llm_call_async(
+                {
+                    "model": "test/model",
+                    "operation": "generation",
+                    "input_tokens": 42,
+                    "output_tokens": 12,
+                    "cached_tokens": 4,
+                    "cost_usd": 0.003,
+                    "duration_ms": 50,
+                    "status": "succeeded",
+                    "request_id": "test-request",
+                }
+            )
+        finally:
+            await llm.close()
+
+    asyncio.run(record_usage())  # Exercise accounting without making a provider request.
+    with session() as db:
+        call = db.scalar(select(LLMCall))
+        assert call.resource_id == "usage-test-resource"
+        assert call.request_id == "test-request" and call.cached_tokens == 4
+    response = api.client.get("/v1/metrics/usage")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "input_tokens": 42,
+        "output_tokens": 12,
+        "cost_usd": 0.003,
+        "requests": 1,
+        "unknown_cost_calls": 0,
+        "cache_hits": 0,
+    }

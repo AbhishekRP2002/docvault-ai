@@ -1,13 +1,13 @@
 from collections import defaultdict
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
-from docvault.ai.types import Evidence
-from docvault.cache import cache_get, cache_set, count_metric, signature
+from docvault.cache import cache_get, cache_set, calculate_json_fingerprint, count_metric
 from docvault.config import get_settings
 from docvault.db import session
 from docvault.documents import require_versions
 from docvault.errors import AppError
+from docvault.llm.types import Evidence
 from docvault.models import Chunk
 
 
@@ -24,7 +24,7 @@ def calculate_rrf(rankings: list[list[str]], constant: int = 60) -> list[str]:
     return sorted(scores, key=lambda identifier: (-scores[identifier], identifier))
 
 
-def chunk_evidence(chunk: Chunk, version) -> Evidence:
+def create_cited_evidence_record(chunk: Chunk, version) -> Evidence:
     """Combine stored chunk content and source metadata into a citation-ready evidence record."""
     return Evidence(
         id=chunk.id,
@@ -37,47 +37,71 @@ def chunk_evidence(chunk: Chunk, version) -> Evidence:
     )
 
 
-async def retrieve(query: str, version_ids: list[str], ai) -> list[Evidence]:
+def require_compatible_versions(db, version_ids: list[str], embedding_model: str):
+    """Reject unavailable sources or sources indexed with a different embedding model."""
+    versions = require_versions(db, version_ids)
+    if any(version.embedding_model != embedding_model for version in versions):
+        raise AppError(
+            409,
+            "embedding_model_changed",
+            "These documents use a different embedding model. Reindex them before chatting.",
+        )
+    return versions
+
+
+def configure_hnsw_search(db) -> None:
+    """Enable ordered iterative HNSW search within the current database transaction only."""
+    # pgvector >=0.8 continues scanning when version filtering discards initial neighbors.
+    # https://github.com/pgvector/pgvector#iterative-index-scans
+    db.execute(text("SET LOCAL hnsw.ef_search = 200"))
+    db.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+
+
+def build_semantic_candidates_query(version_id: str, vector: list[float]):
+    """Build a scoped nearest-neighbor query eligible for the native cosine HNSW index."""
+    return (
+        select(Chunk)
+        .where(Chunk.version_id == version_id, Chunk.embedding.is_not(None))
+        .order_by(Chunk.embedding.cosine_distance(vector))
+        .limit(30)
+    )
+
+
+async def retrieve_relevant_chunks(query: str, version_ids: list[str], llm) -> list[Evidence]:
     """Fuse scoped cosine and full-text rankings into evidence with selected-source coverage.
 
     Reuse query embeddings and reject versions indexed with a different embedding model.
+    HNSW is approximate; iterative filtering has bounded work and no exhaustive fallback.
     """
     settings = get_settings()
     with session() as db:
-        versions = require_versions(db, version_ids)
-        if any(v.embedding_model != settings.openrouter_embedding_model for v in versions):
-            raise AppError(
-                409,
-                "embedding_model_changed",
-                "These documents use a different embedding model. Reindex them before chatting.",
-            )
-    key = "query:" + signature(
+        require_compatible_versions(db, version_ids, settings.openrouter_embedding_model)
+    key = "query:" + calculate_json_fingerprint(
         [query, settings.openrouter_embedding_model, settings.embedding_dimensions]
     )
     vector = cache_get(key)
     if vector is None:
-        vector = (await ai.embed([query]))[0]
+        vector = (await llm.embed_texts([query]))[0]
         cache_set(key, vector, 86400)
     else:
         count_metric("embedding_cache_hits")
     with session() as db:
-        versions = require_versions(db, version_ids)
+        versions = require_compatible_versions(db, version_ids, settings.openrouter_embedding_model)
+        configure_hnsw_search(db)
         evidence, chosen, remaining = {}, [], []
         for version in versions:
-            base = select(Chunk).where(Chunk.version_id == version.id, Chunk.embedding.is_not(None))
-            dense = list(
-                db.scalars(base.order_by(Chunk.embedding.cosine_distance(vector)).limit(30))
-            )
+            dense = list(db.scalars(build_semantic_candidates_query(version.id, vector)))
             terms = func.websearch_to_tsquery("english", query)
             lexical = list(
                 db.scalars(
-                    base.where(Chunk.search.op("@@")(terms))
+                    select(Chunk)
+                    .where(Chunk.version_id == version.id, Chunk.search.op("@@")(terms))
                     .order_by(func.ts_rank_cd(Chunk.search, terms).desc())
                     .limit(30)
                 )
             )
             for chunk in dense + lexical:
-                evidence[chunk.id] = chunk_evidence(chunk, version)
+                evidence[chunk.id] = create_cited_evidence_record(chunk, version)
             ranked = calculate_rrf([[c.id for c in dense], [c.id for c in lexical]])
             chosen.extend(ranked[:2])
             remaining.extend(ranked[2:])
@@ -86,7 +110,7 @@ async def retrieve(query: str, version_ids: list[str], ai) -> list[Evidence]:
         return [evidence[identifier] for identifier in selected]
 
 
-def citation(evidence: Evidence) -> dict:
+def build_public_citation(evidence: Evidence) -> dict:
     """Build a public citation payload from an evidence record and its original text and location."""
     return dict(
         citation_id=evidence.id,

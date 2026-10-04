@@ -3,16 +3,16 @@ from pathlib import Path
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
 
-from docvault.cache import notify_change, signature
+from docvault.cache import calculate_json_fingerprint, notify_change
 from docvault.db import session
 from docvault.errors import AppError
 from docvault.models import Document, Idempotency, Job, Version, now
-from docvault.storage import storage_file
+from docvault.storage import resolve_storage_path
 
 
-def advisory_lock(db, key: str):
+def acquire_upload_advisory_lock(db, key: str):
     """Acquire a transaction-scoped PostgreSQL advisory lock derived from a request key."""
-    db.execute(select(func.pg_advisory_xact_lock(int(signature(key)[:15], 16))))
+    db.execute(select(func.pg_advisory_xact_lock(int(calculate_json_fingerprint(key)[:15], 16))))
 
 
 def require_document(db, document_id: str, *, lock=False) -> Document:
@@ -51,7 +51,7 @@ def require_versions(db, version_ids: list[str], *, ready=True) -> list[Version]
     ]
 
 
-def document_response(db, doc: Document, version: Version | None = None) -> dict:
+def serialize_document_response(db, doc: Document, version: Version | None = None) -> dict:
     """Build a library payload from a document and its supplied or latest version."""
     version = version or db.get(Version, doc.latest_version_id)
     insights = version.insights or {}
@@ -77,17 +77,17 @@ def document_response(db, doc: Document, version: Version | None = None) -> dict
     )
 
 
-def accept_upload(info: dict, key: str | None, document_id: str | None = None) -> dict:
+def accept_document_upload(info: dict, key: str | None, document_id: str | None = None) -> dict:
     """Persist or reuse a validated upload and create ingestion intent with the version.
 
     Serialize duplicate requests, replay matching keys, and remove any unadopted source file.
     """
-    fingerprint = signature([info["sha256"], info["filename"], document_id])
+    fingerprint = calculate_json_fingerprint([info["sha256"], info["filename"], document_id])
     scoped_key = f"upload:{document_id or 'new'}:{key}" if key else None
     adopted = False
     try:
         with session() as db, db.begin():
-            advisory_lock(db, scoped_key or f"upload:{fingerprint}")
+            acquire_upload_advisory_lock(db, scoped_key or f"upload:{fingerprint}")
             if scoped_key and (record := db.get(Idempotency, scoped_key)):
                 if record.fingerprint != fingerprint:
                     raise AppError(
@@ -96,7 +96,9 @@ def accept_upload(info: dict, key: str | None, document_id: str | None = None) -
                         "This request key was used for different content.",
                     )
                 require_document(db, record.resource_id)
-                return record.result or document_response(db, db.get(Document, record.resource_id))
+                return record.result or serialize_document_response(
+                    db, db.get(Document, record.resource_id)
+                )
             doc = require_document(db, document_id, lock=True) if document_id else None
             if not doc:
                 previous = db.scalar(
@@ -121,10 +123,10 @@ def accept_upload(info: dict, key: str | None, document_id: str | None = None) -
                                 key=scoped_key,
                                 fingerprint=fingerprint,
                                 resource_id=doc.id,
-                                result=jsonable_encoder(document_response(db, doc)),
+                                result=jsonable_encoder(serialize_document_response(db, doc)),
                             )
                         )
-                    return document_response(db, doc)
+                    return serialize_document_response(db, doc)
                 number = (
                     db.scalar(
                         select(func.max(Version.version_number)).where(
@@ -150,14 +152,14 @@ def accept_upload(info: dict, key: str | None, document_id: str | None = None) -
                         key=scoped_key,
                         fingerprint=fingerprint,
                         resource_id=doc.id,
-                        result=jsonable_encoder(document_response(db, doc)),
+                        result=jsonable_encoder(serialize_document_response(db, doc)),
                     )
                 )
             db.flush()
-            result = document_response(db, doc)
+            result = serialize_document_response(db, doc)
         adopted = True
         notify_change()
         return result
     finally:
         if not adopted:
-            storage_file(info["storage_key"]).unlink(missing_ok=True)
+            resolve_storage_path(info["storage_key"]).unlink(missing_ok=True)
