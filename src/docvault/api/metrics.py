@@ -1,10 +1,84 @@
-from fastapi import APIRouter
+from datetime import UTC, datetime, timedelta
+
+from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 
 from docvault.db import session
 from docvault.models import Document, Job, LLMCall, MetricBucket, Version
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
+
+
+def _usage_values(
+    inputs: int | None = 0,
+    outputs: int | None = 0,
+    cost: float | None = None,
+    requests: int = 0,
+    unknown: int = 0,
+):
+    """Keep missing cost distinct from a measured zero or a partial known subtotal."""
+    return dict(
+        input_tokens=int(inputs or 0),
+        output_tokens=int(outputs or 0),
+        cost_usd=None if requests and requests == unknown else float(cost or 0),
+        requests=int(requests),
+        unknown_cost_calls=int(unknown),
+    )
+
+
+@router.get("/usage/history")
+def get_usage_history(days: int = Query(default=30, ge=1, le=90)):
+    """Daily recorded LLM usage, including today, grouped by UTC event date.
+
+    Empty days are zero-filled. Null cost means every call lacks cost data;
+    otherwise cost is the known subtotal, with unknown calls counted separately.
+    Model breakdowns include the twenty most active models in the same period.
+    """
+    end = datetime.now(UTC)
+    start = end.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    day = func.date(func.timezone("UTC", LLMCall.created_at))
+    fields = (
+        func.sum(LLMCall.input_tokens),
+        func.sum(LLMCall.output_tokens),
+        func.sum(LLMCall.cost_usd),
+        func.count(),
+        func.count().filter(LLMCall.cost_usd.is_(None)),
+    )
+    period = (LLMCall.created_at >= start, LLMCall.created_at <= end)
+    with session() as db:
+        daily = {
+            row[0].isoformat(): _usage_values(*row[1:])
+            for row in db.execute(select(day, *fields).where(*period).group_by(day))
+        }
+        models = [
+            dict(model=row[0], **_usage_values(*row[1:]))
+            for row in db.execute(
+                select(LLMCall.model, *fields)
+                .where(*period)
+                .group_by(LLMCall.model)
+                .order_by(func.count().desc(), LLMCall.model)
+                .limit(20)
+            )
+        ]
+    buckets = []
+    for offset in range(days):
+        date = (start + timedelta(days=offset)).date().isoformat()
+        buckets.append(dict(date=date, **daily.get(date, _usage_values())))
+    totals = _usage_values(
+        inputs=sum(row["input_tokens"] for row in buckets),
+        outputs=sum(row["output_tokens"] for row in buckets),
+        cost=sum(row["cost_usd"] or 0 for row in buckets),
+        requests=sum(row["requests"] for row in buckets),
+        unknown=sum(row["unknown_cost_calls"] for row in buckets),
+    )
+    return dict(
+        timezone="UTC",
+        start_date=start.date().isoformat(),
+        end_date=end.date().isoformat(),
+        totals=totals,
+        buckets=buckets,
+        models=models,
+    )
 
 
 @router.get("/documents")
