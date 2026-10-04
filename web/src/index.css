@@ -28,13 +28,13 @@
 }
 
 :root {
-  --background: #f7f8fa;
-  --foreground: #181b22;
+  --background: #f7f7f6;
+  --foreground: #25272c;
   --card: #fff;
-  --primary: #242832;
-  --secondary: #e9ebef;
-  --muted-foreground: #626b79;
-  --border: #e3e6eb;
+  --primary: #25272c;
+  --secondary: #f0f0ef;
+  --muted-foreground: #70716f;
+  --border: #e8e8e6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -75,6 +75,23 @@ button:disabled {
 }
 .animate-enter {
   animation: enter 0.22s ease-out both;
+}
+.skeleton {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, #ffffffa0, transparent);
+  transform: translateX(-100%);
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  to {
+    transform: translateX(100%);
+  }
 }
 @keyframes enter {
   from {
@@ -197,7 +214,7 @@ button:disabled {
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
+    animation: none !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }

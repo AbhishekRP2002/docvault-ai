@@ -60,14 +60,53 @@ export function EmptyState({
   );
 }
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("animate-pulse rounded-md bg-muted", className)} />;
+  return <div className={cn("skeleton rounded bg-muted", className)} />;
+}
+export function PageSkeleton({
+  page,
+}: {
+  page: "library" | "analytics" | "chat";
+}) {
+  return (
+    <div
+      role="status"
+      aria-label={`Loading ${page === "library" ? "files" : page === "analytics" ? "usage" : "run"}`}
+      className="animate-enter p-5 sm:p-7"
+    >
+      <div className="mb-5 flex items-center justify-between">
+        <Skeleton className="h-5 w-20" />
+        <Skeleton className="h-8 w-28" />
+      </div>
+      {page === "library" ? (
+        <>
+          <Skeleton className="mb-6 h-8 w-72 max-w-full" />
+          <LoadingRows />
+        </>
+      ) : page === "analytics" ? (
+        <>
+          <div className="mb-6 flex gap-6">
+            {[0, 1, 2].map((n) => (
+              <Skeleton key={n} className="h-14 flex-1" />
+            ))}
+          </div>
+          <Skeleton className="h-72 w-full" />
+        </>
+      ) : (
+        <div className="mx-auto mt-24 max-w-xl space-y-5">
+          <Skeleton className="h-7 w-3/5" />
+          <Skeleton className="h-28 w-full" />
+        </div>
+      )}
+      <span className="sr-only">Loading…</span>
+    </div>
+  );
 }
 export function LoadingRows() {
   return (
-    <div className="space-y-6 p-6" aria-label="Loading" role="status">
-      {[0, 1, 2].map((n) => (
+    <div className="space-y-5 p-5" aria-label="Loading" role="status">
+      {[0, 1, 2, 3, 4].map((n) => (
         <div key={n} className="flex items-center gap-4">
-          <Skeleton className="size-10" />
+          <Skeleton className="size-5" />
           <div className="flex-1 space-y-2">
             <Skeleton className="h-4 w-1/3" />
             <Skeleton className="h-3 w-1/5" />
@@ -82,8 +121,8 @@ const statusLabels: Record<DocumentStatus, string> = {
   ready: "Ready",
   failed: "Needs attention",
   queued: "Queued",
-  parsing: "Reading document",
-  chunking: "Organizing content",
+  parsing: "Parsing",
+  chunking: "Chunking",
   embedding: "Indexing",
 };
 export function StatusBadge({ status }: { status: DocumentStatus }) {
@@ -98,12 +137,14 @@ export function StatusBadge({ status }: { status: DocumentStatus }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-1 text-[11px] font-medium",
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors duration-200",
         status === "ready"
           ? "bg-emerald-50 text-emerald-700"
           : status === "failed"
             ? "bg-red-50 text-red-700"
-            : "bg-primary/7 text-primary",
+            : status === "queued"
+              ? "bg-muted text-muted-foreground"
+              : "bg-blue-50 text-blue-700",
       )}
     >
       <Icon
@@ -138,21 +179,21 @@ export function PageHeading({
 }: {
   eyebrow?: string;
   title: string;
-  description: string;
+  description?: string;
   children?: ReactNode;
 }) {
   return (
-    <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
       <div>
         {eyebrow && (
           <p className="mb-2 text-[11px] font-medium text-muted-foreground">
             {eyebrow}
           </p>
         )}
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">
-          {title}
-        </h1>
-        <p className="mt-2 text-sm text-muted-foreground">{description}</p>
+        <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
+        {description && (
+          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+        )}
       </div>
       {children}
     </div>

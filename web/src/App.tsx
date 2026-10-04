@@ -23,7 +23,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PastRunRow } from "@/components/past-run-row";
-import { ErrorState, LoadingRows } from "@/components/common";
+import { ErrorState, LoadingRows, PageSkeleton } from "@/components/common";
+import { useDocumentUploads } from "@/hooks/use-document-uploads";
 const Library = lazy(() =>
   import("@/pages/library").then((m) => ({ default: m.Library })),
 );
@@ -48,6 +49,7 @@ function getLocation(): { page: Page; chat: string | null } {
 }
 export default function App() {
   const client = useQueryClient();
+  const transfer = useDocumentUploads();
   const [location, setLocation] = useState(getLocation);
   const [initialVersions, setInitialVersions] = useState<string[]>([]);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -125,7 +127,7 @@ export default function App() {
     <>
       <a
         href="#library"
-        className="flex h-14 shrink-0 items-center gap-2.5 border-b px-5 text-[15px] font-semibold tracking-tight"
+        className="flex h-12 shrink-0 items-center gap-2.5 px-5 text-[15px] font-semibold tracking-tight"
         onClick={() => setMobileOpen(false)}
       >
         <span className="grid size-7 place-items-center rounded-md bg-foreground text-card">
@@ -133,8 +135,8 @@ export default function App() {
         </span>
         DocVault
       </a>
-      <div className="px-3 pt-5">
-        <div className="mb-6 flex items-center gap-2.5 px-2">
+      <div className="px-3 pt-4">
+        <div className="mb-5 flex items-center gap-2.5 px-2">
           <span className="grid size-7 place-items-center rounded-md border bg-card text-xs font-medium">
             W
           </span>
@@ -156,7 +158,7 @@ export default function App() {
               className={cn(
                 "h-9 w-full justify-start gap-2.5 px-2 text-[13px] font-normal",
                 location.page === id
-                  ? "bg-secondary font-medium"
+                  ? "bg-blue-50 font-medium text-blue-700 hover:bg-blue-50 hover:text-blue-700"
                   : "text-muted-foreground",
               )}
               onClick={() => {
@@ -183,7 +185,7 @@ export default function App() {
             "h-9 w-full justify-start gap-2.5 px-2 text-[13px] font-normal",
             location.page === "chat" &&
               !location.chat &&
-              "bg-secondary font-medium",
+              "bg-blue-50 font-medium text-blue-700 hover:bg-blue-50 hover:text-blue-700",
           )}
           onClick={() => selectRun(null)}
           aria-current={
@@ -191,7 +193,7 @@ export default function App() {
           }
         >
           <SquarePen className="size-4" />
-          New Run
+          New run
         </Button>
         <Button
           variant="ghost"
@@ -201,7 +203,7 @@ export default function App() {
           aria-controls="past-runs"
         >
           <History className="size-4" />
-          Past Runs
+          Past runs
           <ChevronDown
             className={cn(
               "ml-auto size-3 transition-transform",
@@ -292,11 +294,11 @@ export default function App() {
   );
   return (
     <div className="flex h-dvh min-h-0 overflow-hidden">
-      <aside className="hidden w-[232px] shrink-0 flex-col border-r bg-background lg:flex">
+      <aside className="hidden w-[216px] shrink-0 flex-col border-r bg-background lg:flex">
         {sidebar}
       </aside>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-14 shrink-0 items-center justify-between border-b bg-card px-5">
+      <div className="flex min-w-0 flex-1 flex-col bg-card">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b bg-card px-5 sm:px-7">
           <div className="flex items-center gap-2">
             <Button
               variant="ghost"
@@ -332,10 +334,25 @@ export default function App() {
               )}
             </div>
           </div>
-          <span className="text-[11px] text-muted-foreground">
-            <span className="grid size-7 place-items-center rounded-full bg-secondary text-xs font-medium">
-              W
-            </span>
+          <span
+            className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+            title={
+              connected
+                ? "Document status updates are connected"
+                : "Checking for updates every few seconds"
+            }
+          >
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                connected ? "bg-emerald-600" : "bg-amber-500",
+              )}
+            />
+            {transfer.uploading
+              ? "Uploading files"
+              : connected
+                ? "Live updates"
+                : "Reconnecting"}
           </span>
         </div>
         {config.data && !config.data.configured && (
@@ -359,13 +376,14 @@ export default function App() {
             location.page === "chat" ? "overflow-hidden" : "overflow-y-auto",
           )}
         >
-          <Suspense fallback={<LoadingRows />}>
+          <Suspense fallback={<PageSkeleton page={location.page} />}>
             {location.page === "library" ? (
               <Library
                 documents={documents.data?.items || []}
                 loading={documents.isPending}
                 error={documents.error}
                 refresh={() => void documents.refetch()}
+                transfer={transfer}
                 onChat={(ids) => {
                   setInitialVersions(ids);
                   navigate("chat");

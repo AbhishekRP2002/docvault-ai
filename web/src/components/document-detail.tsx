@@ -22,10 +22,16 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { NativeSelect } from "./ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 import { ArtifactResult } from "./artifact-result";
 import { EvidenceLinks } from "./evidence-links";
-import { ErrorState, Field, StatusBadge } from "./common";
+import { ErrorState, Field, Skeleton, StatusBadge } from "./common";
 export function DocumentDetail({
   document: doc,
   onClose,
@@ -182,20 +188,24 @@ function Detail({
           <TabsContent value="overview">
             {versions.data && versions.data.items.length > 1 && (
               <Field label="Viewing version">
-                <NativeSelect
-                  className="mb-5"
+                <Select
                   value={versionId}
-                  onChange={(e) => {
-                    setVersionId(e.target.value);
+                  onValueChange={(value) => {
+                    setVersionId(value);
                     setSummaryId(null);
                   }}
                 >
-                  {versions.data.items.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      Version {v.version_number} · {v.status}
-                    </option>
-                  ))}
-                </NativeSelect>
+                  <SelectTrigger className="mb-5" aria-label="Viewing version">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {versions.data.items.map((v) => (
+                      <SelectItem key={v.id} value={v.id}>
+                        Version {v.version_number} · {v.status}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </Field>
             )}
             {doc.error && <ErrorState error={doc.error} />}
@@ -205,8 +215,23 @@ function Detail({
                 retry={() => void insights.refetch()}
               />
             )}
-            {insights.data?.data ? (
-              <div className="space-y-7">
+            {insights.isPending ? (
+              <div
+                className="space-y-5"
+                role="status"
+                aria-label="Loading document insights"
+              >
+                <Skeleton className="h-3 w-24" />
+                <div className="space-y-2">
+                  <Skeleton className="h-3 w-full" />
+                  <Skeleton className="h-3 w-full" />
+                  <Skeleton className="h-3 w-3/4" />
+                </div>
+                <Skeleton className="h-3 w-28" />
+                <Skeleton className="h-12 w-full" />
+              </div>
+            ) : insights.data?.data ? (
+              <div className="space-y-7 animate-enter">
                 <section>
                   <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     At a glance
@@ -264,24 +289,30 @@ function Detail({
             </p>
             <div className="grid grid-cols-2 gap-4">
               <Field label="Length">
-                <NativeSelect
-                  value={length}
-                  onChange={(e) => setLength(e.target.value)}
-                >
-                  <option value="short">Concise</option>
-                  <option value="medium">Balanced</option>
-                  <option value="long">Detailed</option>
-                </NativeSelect>
+                <Select value={length} onValueChange={setLength}>
+                  <SelectTrigger aria-label="Summary length">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="short">Concise</SelectItem>
+                    <SelectItem value="medium">Balanced</SelectItem>
+                    <SelectItem value="long">Detailed</SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
               <Field label="Tone">
-                <NativeSelect
-                  value={tone}
-                  onChange={(e) => setTone(e.target.value)}
-                >
-                  <option value="neutral">Neutral</option>
-                  <option value="executive">Executive</option>
-                  <option value="plain_language">Plain language</option>
-                </NativeSelect>
+                <Select value={tone} onValueChange={setTone}>
+                  <SelectTrigger aria-label="Summary tone">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="neutral">Neutral</SelectItem>
+                    <SelectItem value="executive">Executive</SelectItem>
+                    <SelectItem value="plain_language">
+                      Plain language
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
             </div>
             <div className="mt-4">
@@ -350,6 +381,24 @@ function Detail({
               />
             )}
             {retry.error && <ErrorState error={retry.error} />}
+            {versions.isPending && (
+              <div
+                className="space-y-4 py-4"
+                role="status"
+                aria-label="Loading version history"
+              >
+                {[0, 1, 2].map((index) => (
+                  <div key={index} className="flex items-center gap-3">
+                    <Skeleton className="size-5" />
+                    <div className="flex-1 space-y-2">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-3 w-32" />
+                    </div>
+                    <Skeleton className="h-5 w-16" />
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="divide-y">
               {versions.data?.items.map((v) => (
                 <div key={v.id} className="py-4">

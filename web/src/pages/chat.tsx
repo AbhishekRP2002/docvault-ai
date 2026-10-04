@@ -357,7 +357,7 @@ export function ChatPage({
                     }
                     submitMode="enter"
                     maxRows={8}
-                    className="min-h-[60px] w-full resize-none rounded-md border-0 bg-transparent p-1 text-[14px] outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring/40 disabled:opacity-50"
+                    className="min-h-[60px] w-full resize-none rounded-md border-0 bg-transparent p-1 text-[14px] outline-none placeholder:text-muted-foreground disabled:opacity-50"
                     disabled={busy}
                   />
                   <div className="flex items-center justify-between">
