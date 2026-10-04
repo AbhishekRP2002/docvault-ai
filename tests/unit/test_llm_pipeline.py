@@ -14,9 +14,13 @@ from docvault.llm.insights import (
     generate_document_comparison,
     generate_document_summary,
 )
-from docvault.llm.parsing import (
-    parse_document_file,
-    parse_text_document,
+from docvault.llm.models import (
+    ChatGenerationLLMResponse,
+    CitedKeyInsight,
+    ComparisonDimensionLLMResponse,
+    Evidence,
+    InputQueryRewriteLLMResponse,
+    InsightsGenerationLLMResponse,
 )
 from docvault.llm.provider import (
     DeltaCallback,
@@ -25,13 +29,9 @@ from docvault.llm.provider import (
     Schema,
     token_count,
 )
-from docvault.llm.types import (
-    ChatGenerationLLMResponse,
-    CitedKeyInsight,
-    ComparisonDimensionLLMResponse,
-    Evidence,
-    InputQueryRewriteLLMResponse,
-    InsightsGenerationLLMResponse,
+from docvault.parsing import (
+    parse_document_file,
+    parse_text_document,
 )
 
 
@@ -100,7 +100,7 @@ def test_tables_repeat_headers_and_preserve_all_rows():
     from docling_core.types.doc.document import DoclingDocument
     from docling_core.types.doc.items.table.table_data import TableCell, TableData
 
-    from docvault.llm.parsing import chunk_docling_document
+    from docvault.parsing import chunk_docling_document
 
     document = DoclingDocument(name="quote")
     document.add_heading("Pricing")
@@ -138,7 +138,7 @@ def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeyp
     from docling_core.types.doc.document import DoclingDocument
     from docling_core.types.doc.labels import DocItemLabel
 
-    from docvault.llm import parsing
+    from docvault import parsing
 
     document = DoclingDocument(name="contract")
     for page in range(1, 4):

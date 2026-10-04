@@ -18,7 +18,7 @@ from docvault.llm.config import (
     OpenRouterSettings,
     SummaryModelSettings,
 )
-from docvault.llm.types import ChatGenerationLLMResponse
+from docvault.llm.models import ChatGenerationLLMResponse
 
 
 @pytest.fixture

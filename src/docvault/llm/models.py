@@ -1,4 +1,4 @@
-"""Strict task responses, cited evidence, parser records, and public comparison cells."""
+"""Strict LLM task responses, cited evidence, and public comparison cells."""
 
 from typing import Literal
 
@@ -39,24 +39,6 @@ class ChatGenerationLLMResponse(StrictModel):
     outcome: Literal["answered", "insufficient_evidence", "clarification_needed"] = Field(
         description="Whether the answer is supported, lacks evidence, or needs user clarification."
     )
-
-
-class ParsedChunk(StrictModel):
-    """Source text, contextualized embedding input, location, and token count for one chunk."""
-
-    text: str
-    embedding_text: str
-    location: dict
-    token_count: int
-
-
-class ParsedDocument(StrictModel):
-    """Complete parser result before chunk persistence or vector indexing."""
-
-    chunks: list[ParsedChunk]
-    text: str
-    page_count: int | None
-    parser: str
 
 
 class InputQueryRewriteLLMResponse(StrictModel):

@@ -20,11 +20,11 @@ from docvault.documents import require_document, require_version
 from docvault.integrations import create_llm_client
 from docvault.jobs import SourceDeleted, job_checkpoint
 from docvault.llm.insights import generate_document_comparison, generate_document_summary
-from docvault.llm.parsing import parse_document_file
+from docvault.llm.models import Evidence
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import token_count
-from docvault.llm.types import Evidence, ParsedDocument
 from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, Version, now
+from docvault.parsing import ParsedDocument, parse_document_file
 from docvault.retrieval import create_cited_evidence_record
 from docvault.storage import resolve_storage_path
 

@@ -18,9 +18,9 @@ from docvault.db import session
 from docvault.documents import require_document, require_version, require_versions
 from docvault.errors import AppError
 from docvault.llm.graphs import run_document_chat_workflow
+from docvault.llm.models import ChatGenerationLLMResponse, Evidence
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import ProviderError
-from docvault.llm.types import ChatGenerationLLMResponse, Evidence
 from docvault.models import Chat, Message, Version, now
 from docvault.retrieval import (
     RETRIEVAL_CONFIGURATION,

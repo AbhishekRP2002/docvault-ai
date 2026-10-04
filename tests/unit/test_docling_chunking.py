@@ -10,8 +10,8 @@ from docling_core.types.doc.document import DoclingDocument
 from docling_core.types.doc.items.table.table_data import TableCell, TableData
 from docling_core.types.doc.labels import DocItemLabel
 
-from docvault.llm.parsing import chunk_docling_document, parse_text_document
 from docvault.llm.provider import ContextLimitError, token_count
+from docvault.parsing import chunk_docling_document, parse_text_document
 
 
 def provenance(page: int, text: str) -> ProvenanceItem:

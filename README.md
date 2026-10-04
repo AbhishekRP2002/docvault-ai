@@ -43,7 +43,7 @@ Hybrid retrieval takes at most 15 semantic and 15 lexical candidates across the 
 
 ## Configure LLM tasks
 
-Edit [`src/docvault/llm/prompts.py`](src/docvault/llm/prompts.py) for system prompts and summary word targets. [`src/docvault/llm/config.py`](src/docvault/llm/config.py) contains model defaults, context/output reservations, optional temperature and embedding batch capacities. All Pydantic response models are in `llm/types.py`.
+Edit [`src/docvault/llm/prompts.py`](src/docvault/llm/prompts.py) for system prompts and summary word targets. [`src/docvault/llm/config.py`](src/docvault/llm/config.py) contains model defaults, context/output reservations, optional temperature and embedding batch capacities. LLM response/evidence models are in [`src/docvault/llm/models.py`](src/docvault/llm/models.py). Document conversion, chunking and the `ParsedChunk`/`ParsedDocument` models belong to [`src/docvault/parsing.py`](src/docvault/parsing.py), beside the ingestion orchestration in `processing.py`.
 
 | Task | Repository default | Environment override |
 |---|---|---|

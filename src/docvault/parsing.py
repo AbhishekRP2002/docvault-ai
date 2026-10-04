@@ -28,11 +28,33 @@ from docling_core.types.doc.document import DoclingDocument
 from docling_core.types.doc.items.table.table import TableItem
 from docling_core.types.doc.items.text import SectionHeaderItem, TitleItem
 from docling_core.types.doc.labels import DocItemLabel
+from pydantic import BaseModel, ConfigDict
 
 from docvault.llm.provider import ContextLimitError, token_count
-from docvault.llm.types import ParsedChunk, ParsedDocument
 
 CHUNK_TOKENS = 600
+
+
+class ParsedChunk(BaseModel):
+    """Source text, contextualized embedding input, location, and token count for one chunk."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    embedding_text: str
+    location: dict
+    token_count: int
+
+
+class ParsedDocument(BaseModel):
+    """Complete parser result before chunk persistence or vector indexing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunks: list[ParsedChunk]
+    text: str
+    page_count: int | None
+    parser: str
 
 
 class _DocumentTokenizer(BaseTokenizer):

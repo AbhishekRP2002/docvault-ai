@@ -8,7 +8,7 @@ from docvault.config import get_settings
 from docvault.db import session
 from docvault.documents import require_versions
 from docvault.errors import AppError
-from docvault.llm.types import Evidence
+from docvault.llm.models import Evidence
 from docvault.models import Chunk, Version
 
 SEMANTIC_CANDIDATE_LIMIT = 15

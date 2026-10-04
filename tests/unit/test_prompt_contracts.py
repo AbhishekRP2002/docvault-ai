@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 from docvault.cache import calculate_json_fingerprint
 from docvault.llm import prompts
 from docvault.llm.config import GenerationModelConfig, LLMTask
-from docvault.llm.types import (
+from docvault.llm.models import (
     ChatGenerationLLMResponse,
     CitedKeyInsight,
     ComparisonDimensionLLMResponse,

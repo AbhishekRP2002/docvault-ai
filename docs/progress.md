@@ -1,8 +1,16 @@
 # Implementation and verification ledger
 
-Updated: 4 October 2026. This ledger records the current repository, not just the planned architecture. The [specification](spec.md) defines acceptance; the [implementation plan](implementation-plan.md) defines remaining work.
+Updated: 5 October 2026. This ledger records the current repository, not just the planned architecture. The [specification](spec.md) defines acceptance; the [implementation plan](implementation-plan.md) defines remaining work.
 
 **Implemented** means code exists. **Verified** describes a specific executed check. **Partial** means some scope or acceptance evidence is missing. A bonus is not complete merely because its endpoint exists.
+
+## Parser placement and model naming: 5 October 2026
+
+- Moved `llm/parsing.py` to `src/docvault/parsing.py` beside ingestion orchestration in `processing.py`: local Docling conversion, chunking and provenance are ingestion work, with no LLM calls. Moved strict `ParsedChunk`/`ParsedDocument` records into that module. Renamed `llm/types.py` to `llm/models.py` for LLM response/evidence/comparison records; the root `models.py` remains SQLAlchemy persistence models. Updated application/test imports, a module-level monkeypatch target, warm-up script, README, spec and implementation plan. Historical entries below retain the file names used at the time.
+- Compared both parser record schemas and all seven LLM/evidence/comparison JSON schemas against the previous revision: unchanged. Parser helpers, limits, source mapping, cache fingerprint inputs and prompt text are unchanged; existing token-count/context-error helpers remain shared. No compatibility shim, migration, dependency or behavior change.
+- Baseline `.venv/bin/pytest tests/unit -q`: exit 0, **129 passed in 5.51s**. Final same command: exit 0, **129 passed in 8.49s**. `RUN_INTEGRATION=1 TEST_DATABASE_URL=postgresql+psycopg://docvault:docvault@127.0.0.1:15432/docvault_test .venv/bin/pytest tests/integration/test_processing.py tests/integration/test_api.py -q`: exit 0, **40 passed in 12.40s**, exercising persisted parsed artifacts, ingestion, analysis and API responses in disposable test schemas.
+- `.venv/bin/ruff check src tests migrations scripts`: exit 0, **All checks passed!**. Initial changed-file format check reported one existing long call in `test_provider.py`; wrapped that call without changing behavior. Final changed-file formatting: exit 0, **17 files already formatted**; `git diff --check`: exit 0. `npm exec --cache /private/tmp/docvault-pyright-npm --offline --yes --package pyright -- pyright`: exit 0, **0 errors / 0 warnings / 0 informations**. `.venv/bin/python scripts/warm_parser.py --help`: exit 0, correct positional-path usage; no model assets downloaded. Import scan found no old parser/model module references in executable code or current architecture docs.
+- Prompt compression was already committed as `00d1943`. User-local root configuration and untracked AGENTS.md remain preserved and unstaged. No fresh live-provider, ANN benchmark, frontend or browser check for this module refactor; no application-data write or retained process.
 
 ## Prompt compression: 4 October 2026
 

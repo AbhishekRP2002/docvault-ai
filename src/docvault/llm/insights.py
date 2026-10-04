@@ -4,18 +4,18 @@ import json
 
 from docvault.llm.config import LLMTask
 from docvault.llm.graphs import InvalidCitationError, validate_citation_ids
+from docvault.llm.models import (
+    ComparisonDimensionLLMResponse,
+    DocumentComparisonCell,
+    Evidence,
+    InsightsGenerationLLMResponse,
+)
 from docvault.llm.prompts import (
     COMPARISON_SYSTEM_PROMPT,
     SUMMARY_WORD_TARGETS,
     build_summary_system_prompt,
 )
 from docvault.llm.provider import ContextLimitError, OpenRouterLLM, token_count
-from docvault.llm.types import (
-    ComparisonDimensionLLMResponse,
-    DocumentComparisonCell,
-    Evidence,
-    InsightsGenerationLLMResponse,
-)
 
 
 def _serialize_prompt_payload(value) -> str:

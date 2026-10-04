@@ -8,8 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from docvault.llm.config import LLMSettings
+from docvault.llm.models import ChatGenerationLLMResponse, InputQueryRewriteLLMResponse
 from docvault.llm.provider import ContextLimitError, OpenRouterLLM, ProviderError
-from docvault.llm.types import ChatGenerationLLMResponse, InputQueryRewriteLLMResponse
 
 PROVIDER_USAGE = {
     "prompt_tokens": 42,
@@ -300,7 +300,9 @@ async def test_task_context_overflow_fails_before_http_without_truncation():
         pytest.fail("Context rejection must happen before a provider request")
 
     llm = create_provider(
-        handler, openrouter_input_query_rewrite_context_tokens=1000, openrouter_input_query_rewrite_max_output_tokens=200
+        handler,
+        openrouter_input_query_rewrite_context_tokens=1000,
+        openrouter_input_query_rewrite_max_output_tokens=200,
     )
     try:
         with pytest.raises(ContextLimitError):

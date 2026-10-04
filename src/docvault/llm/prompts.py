@@ -1,7 +1,7 @@
 """Central prompt templates and cache identities for schema-constrained LLM tasks."""
 
 from docvault.llm.config import GenerationModelConfig, LLMTask
-from docvault.llm.types import (
+from docvault.llm.models import (
     ChatGenerationLLMResponse,
     ComparisonDimensionLLMResponse,
     InputQueryRewriteLLMResponse,

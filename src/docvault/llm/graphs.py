@@ -10,9 +10,9 @@ from typing import Required, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from docvault.llm.models import ChatGenerationLLMResponse, Evidence, InputQueryRewriteLLMResponse
 from docvault.llm.prompts import CHAT_SYSTEM_PROMPT, INPUT_QUERY_REWRITE_SYSTEM_PROMPT
 from docvault.llm.provider import DeltaCallback, OpenRouterLLM
-from docvault.llm.types import ChatGenerationLLMResponse, Evidence, InputQueryRewriteLLMResponse
 
 
 class InvalidCitationError(ValueError):

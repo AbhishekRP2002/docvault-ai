@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from pydantic_core import from_json
 
 from docvault.llm.config import GenerationModelConfig, LLMSettings, LLMTask
-from docvault.llm.types import ChatGenerationLLMResponse
+from docvault.llm.models import ChatGenerationLLMResponse
 
 Schema = TypeVar("Schema", bound=BaseModel)
 UsageCallback = Callable[[dict], Awaitable[None]]

@@ -21,14 +21,13 @@ from docvault import cache, config, jobs, processing
 from docvault import db as database
 from docvault.documents import require_document
 from docvault.llm.config import GenerationModelConfig
-from docvault.llm.provider import ProviderError
-from docvault.llm.types import (
+from docvault.llm.models import (
     CitedKeyInsight,
     InsightsGenerationLLMResponse,
-    ParsedChunk,
-    ParsedDocument,
 )
+from docvault.llm.provider import ProviderError
 from docvault.models import Artifact, Chat, Chunk, Document, Job, JobAttempt, Message, Version, now
+from docvault.parsing import ParsedChunk, ParsedDocument
 
 pytestmark = [
     pytest.mark.integration,

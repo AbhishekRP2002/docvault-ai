@@ -8,8 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
-from docvault.llm.parsing import parse_document_file
 from docvault.llm.provider import token_count
+from docvault.parsing import parse_document_file
 
 
 def main() -> None:

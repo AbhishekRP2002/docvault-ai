@@ -25,7 +25,7 @@ from docvault import cache, integrations
 from docvault.config import get_settings
 from docvault.db import Base, get_engine, session
 from docvault.integrations import create_llm_client
-from docvault.llm.types import ChatGenerationLLMResponse
+from docvault.llm.models import ChatGenerationLLMResponse
 from docvault.models import Chat, Chunk, Document, Idempotency, Job, LLMCall, Message, Version, now
 
 pytestmark = pytest.mark.integration
