@@ -19,7 +19,7 @@ from docvault.errors import AppError
 from docvault.llm.graphs import run_document_chat_workflow
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import ProviderError
-from docvault.llm.types import Answer, Evidence
+from docvault.llm.types import ChatGenerationLLMResponse, Evidence
 from docvault.models import Chat, Message, now
 from docvault.retrieval import build_public_citation, retrieve_relevant_chunks
 
@@ -234,7 +234,7 @@ async def generate_assistant_response(message_id: str, emit_generation_event):
             )
         cached = None if is_retry else cache_get(key)
         if cached:
-            answer = Answer.model_validate(cached["answer"])
+            answer = ChatGenerationLLMResponse.model_validate(cached["answer"])
             evidence = [Evidence.model_validate(item) for item in cached["evidence"]]
             rewritten = cached["query"]
             count_metric("answer_cache_hits")

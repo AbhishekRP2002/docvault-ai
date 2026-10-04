@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from docvault.cache import calculate_json_fingerprint
 from docvault.llm import prompts
 from docvault.llm.config import LLMSettings
-from docvault.llm.types import Answer
+from docvault.llm.types import ChatGenerationLLMResponse
 
 
 @pytest.fixture
@@ -120,12 +120,12 @@ def test_prompt_changes_invalidate_only_the_matching_task(clean_model_environmen
 def test_response_schema_changes_invalidate_generation_identity(
     clean_model_environment, monkeypatch
 ):
-    class AnswerWithConfidence(Answer):
+    class ChatResponseWithConfidence(ChatGenerationLLMResponse):
         confidence: float
 
     configuration = LLMSettings(_env_file=None).generation_model("chat")
     original = prompts.build_generation_identity(configuration, "chat")
-    monkeypatch.setattr(prompts, "Answer", AnswerWithConfidence)
+    monkeypatch.setattr(prompts, "ChatGenerationLLMResponse", ChatResponseWithConfidence)
     changed = prompts.build_generation_identity(configuration, "chat")
     assert calculate_json_fingerprint(original) != calculate_json_fingerprint(changed)
     assert "confidence" in changed["schema"]["properties"]

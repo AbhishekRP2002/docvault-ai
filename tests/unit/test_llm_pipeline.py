@@ -5,7 +5,11 @@ import pytest
 from pydantic import ValidationError
 
 from docvault.llm.config import GenerationModelConfig, LLMSettings
-from docvault.llm.graphs import InvalidCitationError, RewrittenQuestion, run_document_chat_workflow
+from docvault.llm.graphs import (
+    InvalidCitationError,
+    QuestionRewriteLLMResponse,
+    run_document_chat_workflow,
+)
 from docvault.llm.insights import (
     generate_document_comparison,
     generate_document_summary,
@@ -19,7 +23,13 @@ from docvault.llm.provider import (
     ProviderError,
     token_count,
 )
-from docvault.llm.types import Answer, DimensionFinding, DocumentInsights, Evidence, KeyInsight
+from docvault.llm.types import (
+    ChatGenerationLLMResponse,
+    CitedKeyInsight,
+    ComparisonDimensionLLMResponse,
+    Evidence,
+    InsightsGenerationLLMResponse,
+)
 
 
 def source(id="c1", text="Payment is due in 30 days.", version="v1"):
@@ -36,8 +46,10 @@ def source(id="c1", text="Payment is due in 30 days.", version="v1"):
 
 def test_answer_contract_and_strict_schema():
     with pytest.raises(ValidationError):
-        Answer(response="Hi", suggestions=["a", "b", "c", "d"], citation_ids=[], outcome="answered")
-    schema = Answer.model_json_schema()
+        ChatGenerationLLMResponse(
+            response="Hi", suggestions=["a", "b", "c", "d"], citation_ids=[], outcome="answered"
+        )
+    schema = ChatGenerationLLMResponse.model_json_schema()
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == {
         "response",
@@ -160,7 +172,7 @@ def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeyp
 
 class ChatLLM:
     def __init__(self, answer=None, rewrite=None):
-        self.answer = answer or Answer(
+        self.answer = answer or ChatGenerationLLMResponse(
             response="Payment is due in 30 days. [c1]",
             suggestions=["When does it renew?"],
             citation_ids=["c1"],
@@ -170,7 +182,7 @@ class ChatLLM:
         self.generations = 0
 
     async def generate_structured_response(self, schema, messages, *, task):
-        assert schema is RewrittenQuestion
+        assert schema is QuestionRewriteLLMResponse
         assert task == "rewrite"
         return self.rewrite
 
@@ -192,10 +204,10 @@ async def test_graph_rewrites_followups_then_retrieves_fresh_evidence():
         deltas.append(value)
 
     llm = ChatLLM(
-        rewrite=RewrittenQuestion(
-            question="When is the contract payment due?",
+        rewrite=QuestionRewriteLLMResponse(
+            standalone_question="When is the contract payment due?",
             needs_clarification=False,
-            clarification="",
+            clarification_question="",
         )
     )
     answer, evidence, query = await run_document_chat_workflow(
@@ -231,12 +243,19 @@ async def test_graph_without_evidence_does_not_generate_or_fake_deltas():
 
 
 @pytest.mark.asyncio
-async def test_graph_ambiguous_followup_skips_retrieval():
+@pytest.mark.parametrize(
+    "clarification_question,expected_response",
+    [
+        ("Which contract do you mean?", "Which contract do you mean?"),
+        ("", "Which document or detail do you mean?"),
+    ],
+)
+async def test_graph_ambiguous_followup_skips_retrieval(clarification_question, expected_response):
     llm = ChatLLM(
-        rewrite=RewrittenQuestion(
-            question="Which contract?",
+        rewrite=QuestionRewriteLLMResponse(
+            standalone_question="Which contract?",
             needs_clarification=True,
-            clarification="Which contract do you mean?",
+            clarification_question=clarification_question,
         )
     )
 
@@ -254,13 +273,14 @@ async def test_graph_ambiguous_followup_skips_retrieval():
         delta,
     )
     assert answer.outcome == "clarification_needed"
+    assert answer.response == expected_response
     assert llm.generations == 0
 
 
 @pytest.mark.asyncio
 async def test_graph_rejects_invented_citation_ids():
     llm = ChatLLM(
-        Answer(
+        ChatGenerationLLMResponse(
             response="A fee exists", suggestions=[], citation_ids=["invented"], outcome="answered"
         )
     )
@@ -323,17 +343,21 @@ class SummaryLLM:
         self.calls = []
 
     async def generate_structured_response(self, schema, messages, *, task):
-        assert task == ("comparison" if schema is DimensionFinding else "summary")
+        assert task == ("comparison" if schema is ComparisonDimensionLLMResponse else "summary")
         payload = json.loads(messages[-1]["content"])
         self.calls.append(payload)
         ids = [id for section in payload["sections"] for id in section["citation_ids"]]
-        if schema is DimensionFinding:
-            return DimensionFinding(text="Payment terms found.", status="found", citation_ids=ids)
-        return DocumentInsights(
+        if schema is ComparisonDimensionLLMResponse:
+            return ComparisonDimensionLLMResponse(
+                finding_text="Payment terms found.", status="found", citation_ids=ids
+            )
+        return InsightsGenerationLLMResponse(
             summary="The contract defines payment terms.",
             category="Contract",
             tags=["payment"],
-            key_insights=[KeyInsight(text="Payment terms are specified.", citation_ids=[ids[0]])],
+            key_insights=[
+                CitedKeyInsight(insight_text="Payment terms are specified.", citation_ids=[ids[0]])
+            ],
             suggestions=["When is payment due?"],
             citation_ids=ids,
         )
@@ -357,6 +381,9 @@ async def test_long_summary_processes_every_chunk_then_reduces():
     assert len(llm.calls) > 1
     assert result["coverage"] == {"chunks_processed": 9, "total_chunks": 9, "complete": True}
     assert result["options"]["tone"] == "executive"
+    assert result["key_insights"] == [
+        {"text": "Payment terms are specified.", "citation_ids": ["c0"]}
+    ]
 
 
 @pytest.mark.asyncio
@@ -374,6 +401,9 @@ async def test_comparison_preserves_all_selected_versions_and_reports_missing():
     assert [cell["version_id"] for cell in cells] == list(evidence)
     assert cells[0]["status"] == "found" and cells[0]["citation_ids"] == ["c1"]
     assert cells[1]["status"] == "not_found" and cells[1]["citation_ids"] == []
+    assert cells[0]["text"] == "Payment terms found."
+    assert cells[1]["text"] == "No supporting information was found."
+    assert all("finding_text" not in cell for cell in cells)
     assert result["coverage"]["complete"]
 
 
@@ -382,7 +412,7 @@ async def test_summary_rejects_citations_invented_by_provider():
     llm = SummaryLLM()
 
     async def generate_structured_response(schema, messages, *, task):
-        return DocumentInsights(
+        return InsightsGenerationLLMResponse(
             summary="Oops",
             category="Other",
             tags=[],

@@ -19,7 +19,12 @@ from docvault import cache, config, jobs, processing
 from docvault import db as database
 from docvault.llm.config import GenerationModelConfig
 from docvault.llm.provider import ProviderError
-from docvault.llm.types import DocumentInsights, KeyInsight, ParsedChunk, ParsedDocument
+from docvault.llm.types import (
+    CitedKeyInsight,
+    InsightsGenerationLLMResponse,
+    ParsedChunk,
+    ParsedDocument,
+)
 from docvault.models import Artifact, Chat, Chunk, Document, Job, JobAttempt, Message, Version, now
 
 pytestmark = [
@@ -113,11 +118,11 @@ class FakeLLM:
         self.generations += 1
         payload = json.loads(messages[-1]["content"])
         ids = payload["sections"][0]["citation_ids"]
-        return DocumentInsights(
+        return InsightsGenerationLLMResponse(
             summary="Payment is due in 30 days.",
             category="Contract",
             tags=["payment"],
-            key_insights=[KeyInsight(text="Payment term", citation_ids=ids)],
+            key_insights=[CitedKeyInsight(insight_text="Payment term", citation_ids=ids)],
             suggestions=["When is renewal?"],
             citation_ids=ids,
         )
@@ -150,6 +155,10 @@ def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated
         version = db.get(Version, version_id)
         assert version.status == "ready" and version.insight_status == "ready"
         assert version.insights["summary"] == "Payment is due in 30 days."
+        persisted_insight = version.insights["key_insights"][0]
+        assert persisted_insight["text"] == "Payment term"
+        assert set(persisted_insight) == {"text", "citation_ids"}
+        assert persisted_insight["citation_ids"]
     # Simulate a crash after publishing insights but before acknowledging the job.
     with database.session() as db, db.begin():
         db.get(Job, insight_job_id).status = "queued"

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from pydantic_core import from_json
 
 from docvault.llm.config import GenerationModelConfig, LLMSettings, LLMTask
-from docvault.llm.types import Answer
+from docvault.llm.types import ChatGenerationLLMResponse
 
 Schema = TypeVar("Schema", bound=BaseModel)
 UsageCallback = Callable[[dict], Awaitable[None]]
@@ -176,14 +176,14 @@ class OpenRouterLLM:
 
     async def stream_structured_answer(
         self, messages: list[dict], on_delta: DeltaCallback
-    ) -> Answer:
+    ) -> ChatGenerationLLMResponse:
         """Stream provisional answer text with Pydantic's partial JSON parser and validate via SDK.
 
         The SDK owns schema conversion, accumulation, final validation and stream
         cleanup. Native partial parsing exposes unfinished response strings so the
         UI receives real text deltas before the full JSON object is complete.
         """
-        parameters = self._build_generation_parameters(Answer, messages, "chat")
+        parameters = self._build_generation_parameters(ChatGenerationLLMResponse, messages, "chat")
         started, result, status = time.monotonic(), {}, "failed"
         emitted, stream = "", None
         try:

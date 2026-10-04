@@ -6,13 +6,13 @@ https://docs.langchain.com/oss/python/langgraph/graph-api
 
 import json
 from collections.abc import Awaitable, Callable
-from typing import NotRequired, TypedDict
+from typing import Required, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from docvault.llm.prompts import CHAT_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT
 from docvault.llm.provider import DeltaCallback, OpenRouterLLM
-from docvault.llm.types import Answer, Evidence, RewrittenQuestion
+from docvault.llm.types import ChatGenerationLLMResponse, Evidence, QuestionRewriteLLMResponse
 
 
 class InvalidCitationError(ValueError):
@@ -20,12 +20,14 @@ class InvalidCitationError(ValueError):
 
 
 class ChatState(TypedDict):
-    question: str
+    """Complete invocation state; answer is present and None until generation finishes."""
+
+    question: Required[str]
     query: str
-    history: list[dict]
+    history: Required[list[dict]]
     clarification: str
     evidence: list[Evidence]
-    answer: NotRequired[Answer]
+    answer: ChatGenerationLLMResponse | None
 
 
 def validate_citation_ids(citation_ids: list[str], evidence: list[Evidence]) -> None:
@@ -46,7 +48,7 @@ async def run_document_chat_workflow(
     retrieve_relevant_chunks: Callable[[str], Awaitable[list[Evidence]]],
     llm: OpenRouterLLM,
     on_delta: DeltaCallback,
-) -> tuple[Answer, list[Evidence], str]:
+) -> tuple[ChatGenerationLLMResponse, list[Evidence], str]:
     """Run question rewriting, retrieval, generation, and citation validation.
 
     Return the validated answer, retrieved evidence, and standalone query. Model
@@ -67,7 +69,7 @@ async def run_document_chat_workflow(
         if not state["history"]:
             return {"query": state["question"], "clarification": ""}
         result = await llm.generate_structured_response(
-            RewrittenQuestion,
+            QuestionRewriteLLMResponse,
             [
                 {
                     "role": "system",
@@ -86,8 +88,10 @@ async def run_document_chat_workflow(
             task="rewrite",
         )
         return {
-            "query": result.question,
-            "clarification": (result.clarification or "Which document or detail do you mean?")
+            "query": result.standalone_question,
+            "clarification": (
+                result.clarification_question or "Which document or detail do you mean?"
+            )
             if result.needs_clarification
             else "",
         }
@@ -109,7 +113,7 @@ async def run_document_chat_workflow(
         """Stream a grounded model answer, or return a local clarification or no-evidence result."""
         if state["clarification"]:
             return {
-                "answer": Answer(
+                "answer": ChatGenerationLLMResponse(
                     response=state["clarification"],
                     suggestions=[],
                     citation_ids=[],
@@ -118,7 +122,7 @@ async def run_document_chat_workflow(
             }
         if not state["evidence"]:
             return {
-                "answer": Answer(
+                "answer": ChatGenerationLLMResponse(
                     response="I could not find supporting evidence in the selected documents.",
                     suggestions=[],
                     citation_ids=[],
@@ -150,7 +154,7 @@ async def run_document_chat_workflow(
 
     def validate_generated_answer(state: ChatState) -> dict:
         """Require valid sources for answered results and deduplicate citation IDs in order."""
-        answer = state.get("answer")
+        answer = state["answer"]
         if answer is None:
             raise ValueError("The generation stage did not produce an answer.")
         validate_citation_ids(answer.citation_ids, state["evidence"])
@@ -181,6 +185,10 @@ async def run_document_chat_workflow(
             "query": question,
             "clarification": "",
             "evidence": [],
+            "answer": None,
         }
     )
-    return result["answer"], result["evidence"], result["query"]
+    answer = result.get("answer")
+    if not isinstance(answer, ChatGenerationLLMResponse):
+        raise ValueError("The chat workflow did not produce a validated answer.")
+    return answer, result["evidence"], result["query"]

@@ -24,7 +24,7 @@ from docvault import cache, integrations
 from docvault.config import get_settings
 from docvault.db import Base, get_engine, session
 from docvault.integrations import create_llm_client
-from docvault.llm.types import Answer
+from docvault.llm.types import ChatGenerationLLMResponse
 from docvault.models import Chat, Chunk, Document, Idempotency, Job, LLMCall, Message, Version, now
 
 pytestmark = pytest.mark.integration
@@ -68,7 +68,11 @@ class FakeLLM:
 
     async def generate_structured_response(self, schema, messages, *, task):
         payload = json.loads(messages[-1]["content"])
-        return schema(question=payload["question"], needs_clarification=False, clarification="")
+        return schema(
+            standalone_question=payload["question"],
+            needs_clarification=False,
+            clarification_question="",
+        )
 
     async def stream_structured_answer(self, messages, on_delta):
         payload = json.loads(messages[-1]["content"])
@@ -82,7 +86,7 @@ class FakeLLM:
         split = len(response) // 2
         await on_delta(response[:split])
         await on_delta(response[split:])
-        return Answer(
+        return ChatGenerationLLMResponse(
             response=response,
             suggestions=["What is the renewal date?"],
             citation_ids=[evidence["id"]],

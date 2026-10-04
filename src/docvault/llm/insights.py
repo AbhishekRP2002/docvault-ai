@@ -10,7 +10,12 @@ from docvault.llm.prompts import (
     build_summary_system_prompt,
 )
 from docvault.llm.provider import ContextLimitError, OpenRouterLLM, token_count
-from docvault.llm.types import ComparisonCell, DimensionFinding, DocumentInsights, Evidence
+from docvault.llm.types import (
+    ComparisonDimensionLLMResponse,
+    DocumentComparisonCell,
+    Evidence,
+    InsightsGenerationLLMResponse,
+)
 
 
 def _serialize_prompt_payload(value) -> str:
@@ -70,7 +75,7 @@ def _collect_allowed_citation_ids(records: list[dict]) -> set[str]:
     return {source for record in records for source in record["citation_ids"]}
 
 
-def _validate_summary_citations(result: DocumentInsights, available: set[str]) -> None:
+def _validate_summary_citations(result: InsightsGenerationLLMResponse, available: set[str]) -> None:
     """Reject summary or insight citations that were not available to the generating call."""
     referenced = set(result.citation_ids)
     referenced.update(source for fact in result.key_insights for source in fact.citation_ids)
@@ -109,7 +114,7 @@ async def generate_document_summary(
         summaries = []
         for group in groups:
             result = await llm.generate_structured_response(
-                DocumentInsights,
+                InsightsGenerationLLMResponse,
                 [
                     {"role": "system", "content": instructions},
                     {
@@ -130,6 +135,11 @@ async def generate_document_summary(
             summaries.append(result)
         if len(summaries) == 1:
             final = summaries[0].model_dump()
+            # Keep the stored/public insight shape stable at the output boundary.
+            final["key_insights"] = [
+                {"text": insight.insight_text, "citation_ids": insight.citation_ids}
+                for insight in summaries[0].key_insights
+            ]
             final["citation_ids"] = list(
                 dict.fromkeys(
                     final["citation_ids"]
@@ -166,15 +176,15 @@ async def _extract_comparison_dimension(
     llm: OpenRouterLLM,
     chunks: list[Evidence],
     dimension: str,
-) -> DimensionFinding:
+) -> ComparisonDimensionLLMResponse:
     """Extract one comparison dimension across all supplied sections and reduce findings.
 
     Return not_found for absent evidence. Supported findings retain original
     citations; invalid IDs and reductions that fail to shrink raise errors.
     """
     if not chunks:
-        return DimensionFinding(
-            text="No supporting information was found.", status="not_found", citation_ids=[]
+        return ComparisonDimensionLLMResponse(
+            finding_text="No supporting information was found.", status="not_found", citation_ids=[]
         )
     records, capacity = (
         _build_source_records(chunks),
@@ -185,7 +195,7 @@ async def _extract_comparison_dimension(
         findings = []
         for group in groups:
             result = await llm.generate_structured_response(
-                DimensionFinding,
+                ComparisonDimensionLLMResponse,
                 [
                     {
                         "role": "system",
@@ -214,8 +224,10 @@ async def _extract_comparison_dimension(
         # Missing sections cannot overwrite supported findings during reduction.
         next_records = [finding.model_dump() for finding in findings if finding.status == "found"]
         if not next_records:
-            return DimensionFinding(
-                text="No supporting information was found.", status="not_found", citation_ids=[]
+            return ComparisonDimensionLLMResponse(
+                finding_text="No supporting information was found.",
+                status="not_found",
+                citation_ids=[],
             )
         if token_count(_serialize_prompt_payload(next_records)) >= token_count(
             _serialize_prompt_payload(records)
@@ -249,7 +261,14 @@ async def generate_document_comparison(
         for version_id, evidence in evidence_by_version.items():
             finding = await _extract_comparison_dimension(llm, evidence, dimension)
             validate_citation_ids(finding.citation_ids, evidence)
-            cells.append(ComparisonCell(version_id=version_id, **finding.model_dump()).model_dump())
+            cells.append(
+                DocumentComparisonCell(
+                    version_id=version_id,
+                    text=finding.finding_text,
+                    status=finding.status,
+                    citation_ids=finding.citation_ids,
+                ).model_dump()
+            )
         rows.append({"dimension": dimension, "cells": cells})
     return {
         "dimensions": list(dict.fromkeys(dimensions)),

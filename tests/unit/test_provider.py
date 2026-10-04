@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from docvault.llm.config import LLMSettings
 from docvault.llm.provider import ContextLimitError, OpenRouterLLM, ProviderError
-from docvault.llm.types import Answer, RewrittenQuestion
+from docvault.llm.types import ChatGenerationLLMResponse, QuestionRewriteLLMResponse
 
 
 class ResponseStream(httpx.AsyncByteStream):
@@ -203,9 +203,9 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
             json=completion(
                 json.dumps(
                     {
-                        "question": "When is payment due?",
+                        "standalone_question": "When is payment due?",
                         "needs_clarification": False,
-                        "clarification": "",
+                        "clarification_question": "",
                     }
                 )
             ),
@@ -222,14 +222,18 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
         openrouter_rewrite_temperature=0,
     )
     try:
-        parsed = await llm.generate_structured_response(RewrittenQuestion, [], task="rewrite")
+        parsed = await llm.generate_structured_response(
+            QuestionRewriteLLMResponse, [], task="rewrite"
+        )
     finally:
         await llm.close()
-    assert isinstance(parsed, RewrittenQuestion)
+    assert isinstance(parsed, QuestionRewriteLLMResponse)
+    assert parsed.standalone_question == "When is payment due?"
+    assert parsed.clarification_question == ""
     request = requested[0]
     assert request["model"] == "test/rewrite" and request["max_tokens"] == 512
     assert request["temperature"] == 0
-    assert request["response_format"]["json_schema"]["name"] == "RewrittenQuestion"
+    assert request["response_format"]["json_schema"]["name"] == "QuestionRewriteLLMResponse"
     assert usage[0]["status"] == "succeeded" and usage[0]["cost_usd"] == 0.003
 
 
@@ -260,7 +264,7 @@ async def test_sdk_parse_failures_preserve_provider_usage(content, refusal, fini
     llm = create_provider(handler, record)
     try:
         with pytest.raises(ProviderError):
-            await llm.generate_structured_response(Answer, [], task="summary")
+            await llm.generate_structured_response(ChatGenerationLLMResponse, [], task="summary")
     finally:
         await llm.close()
     assert usage[0]["status"] == "failed" and usage[0]["cost_usd"] == 0.003
@@ -277,7 +281,9 @@ async def test_task_context_overflow_fails_before_http_without_truncation():
     try:
         with pytest.raises(ContextLimitError):
             await llm.generate_structured_response(
-                RewrittenQuestion, [{"role": "user", "content": "evidence " * 1000}], task="rewrite"
+                QuestionRewriteLLMResponse,
+                [{"role": "user", "content": "evidence " * 1000}],
+                task="rewrite",
             )
     finally:
         await llm.close()
