@@ -187,9 +187,8 @@ class OpenRouterLLM:
         started, result, status = time.monotonic(), {}, "failed"
         emitted, stream = "", None
         try:
-            async with self.client.chat.completions.stream(
-                **parameters, stream_options={"include_usage": True}
-            ) as stream:
+            # OpenRouter includes usage automatically in the final SSE message.
+            async with self.client.chat.completions.stream(**parameters) as stream:
                 async for event in stream:
                     if event.type == "chunk":
                         result = event.snapshot.model_dump(exclude={"choices"})

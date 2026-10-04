@@ -6,8 +6,18 @@ import pytest
 from pydantic import ValidationError
 
 from docvault.cache import calculate_json_fingerprint
+from docvault.config import Settings
 from docvault.llm import prompts
-from docvault.llm.config import LLMSettings, LLMTask
+from docvault.llm.config import (
+    ChatModelSettings,
+    ComparisonModelSettings,
+    EmbeddingModelSettings,
+    LLMSettings,
+    LLMTask,
+    OpenRouterSettings,
+    RewriteModelSettings,
+    SummaryModelSettings,
+)
 from docvault.llm.types import ChatGenerationLLMResponse
 
 
@@ -15,6 +25,70 @@ from docvault.llm.types import ChatGenerationLLMResponse
 def clean_model_environment(monkeypatch):
     for name in LLMSettings.model_fields:
         monkeypatch.delenv(name.upper(), raising=False)
+
+
+@pytest.mark.parametrize(
+    "settings_class,environment_name,configuration_method",
+    [
+        (ChatModelSettings, "OPENROUTER_CHAT_MODEL", "chat_model_configuration"),
+        (RewriteModelSettings, "OPENROUTER_REWRITE_MODEL", "rewrite_model_configuration"),
+        (SummaryModelSettings, "OPENROUTER_SUMMARY_MODEL", "summary_model_configuration"),
+        (
+            ComparisonModelSettings,
+            "OPENROUTER_COMPARISON_MODEL",
+            "comparison_model_configuration",
+        ),
+        (EmbeddingModelSettings, "OPENROUTER_EMBEDDING_MODEL", "embedding_model"),
+    ],
+)
+def test_task_settings_can_load_independently(
+    clean_model_environment, tmp_path, settings_class, environment_name, configuration_method
+):
+    """Each task reads its own dotenv fields without validating unrelated app settings."""
+    dotenv = tmp_path / "task.env"
+    dotenv.write_text(
+        f"{environment_name}=test/independent-model\n"
+        "OPENROUTER_API_KEY=unit-test-placeholder\n"
+        "DATABASE_URL=not-a-database\n"
+        "MAX_UPLOAD_BYTES=not-an-integer\n"
+    )
+    settings = settings_class(_env_file=dotenv)
+    assert getattr(settings, configuration_method)().model == "test/independent-model"
+    assert "openrouter_api_key" not in settings.model_dump()
+    assert "database_url" not in settings.model_dump()
+
+
+def test_task_settings_own_disjoint_fields_and_aggregate_preserves_them():
+    """The aggregate exposes all existing fields without sharing ownership between tasks."""
+    settings_classes = (
+        OpenRouterSettings,
+        ChatModelSettings,
+        RewriteModelSettings,
+        SummaryModelSettings,
+        ComparisonModelSettings,
+        EmbeddingModelSettings,
+    )
+    fields = [name for settings_class in settings_classes for name in settings_class.model_fields]
+    assert len(fields) == len(set(fields))
+    assert set(LLMSettings.model_fields) == set(fields)
+
+
+def test_application_settings_retains_task_overrides_and_validated_profiles(
+    clean_model_environment, monkeypatch
+):
+    """Existing app-level defaults and environment overrides survive the settings split."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    monkeypatch.setenv("OPENROUTER_CHAT_MODEL", "test/application-chat")
+    monkeypatch.setenv("OPENROUTER_COMPARISON_MODEL", "test/application-comparison")
+    settings = Settings()
+    assert settings.generation_model("chat").model == "test/application-chat"
+    assert settings.generation_model("comparison").model == "test/application-comparison"
+    assert settings.embedding_model() == EmbeddingModelSettings(_env_file=None).embedding_model()
+    monkeypatch.delenv("OPENROUTER_CHAT_MODEL")
+    assert (
+        Settings().generation_model("chat").model
+        == Settings.model_fields["openrouter_chat_model"].default
+    )
 
 
 def test_explicit_dotenv_load_and_environment_precedence(
