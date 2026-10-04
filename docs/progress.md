@@ -4,6 +4,24 @@ Updated: 4 October 2026. This ledger records the current repository, not just th
 
 **Implemented** means code exists. **Verified** describes a specific executed check. **Partial** means some scope or acceptance evidence is missing. A bonus is not complete merely because its endpoint exists.
 
+## Prompt compression: 4 October 2026
+
+Shortened all four system templates in `src/docvault/llm/prompts.py`, preserving the task/input/grounding/output structure. Removed repeated wording and repeated example input wrappers. Retained ambiguity-first field ordering and all three reference-resolution examples; untrusted-data boundaries; evidence-only answers, partial support and conflict handling; original claim-specific citations through reduction; supported-negative comparison findings; streaming field order; and follow-up/insight/tag limits. Response schemas, model settings and workflow code are unchanged. Existing prompt fingerprints automatically distinguish the new templates.
+
+| System template | Before tokens | After tokens | Reduction |
+|---|---:|---:|---:|
+| Input-query rewriting | 620 | 391 | 36.9% |
+| Chat | 501 | 311 | 37.9% |
+| Summary | 488 | 324 | 33.6% |
+| Comparison | 365 | 245 | 32.9% |
+
+Counts use the existing tiktoken `cl100k_base` encoding on each literal system template, including the summary's `{target_words}` placeholder. All four meet the requested 30–40% reduction. These are local prompt-only counts, excluding schemas, user payloads and provider framing; they do not imply the same reduction in full request tokens or cost. The preceding template snapshot is `/private/tmp/docvault-prompt-compression-baseline.json`; it is a local verification artifact, not required at runtime.
+
+- Baseline `.venv/bin/pytest tests/unit -q`: exit 0, **129 passed in 5.62s**. Final same command: exit 0, **129 passed in 7.25s**, including actual SDK schema/stream contracts, reference-decision field order and task-local prompt cache identity cases.
+- `.venv/bin/ruff check src/docvault/llm/prompts.py` and `.venv/bin/ruff format --check src/docvault/llm/prompts.py`: exit 0, **All checks passed! / 1 file already formatted**. `npm exec --cache /private/tmp/docvault-pyright-npm --offline --yes --package pyright -- pyright`: exit 0, **0 errors / 0 warnings / 0 informations**. Final `git diff --check`: exit 0.
+- `.venv/bin/python /private/tmp/docvault-prompt-compression-smoke.py`: exit 0, **six successful provider calls** using the unchanged previous smoke assertions: resolved reference, ambiguous singular reference, grounded answer with embedded malicious instruction, partial support, summary original citations, and found/absent comparison. Reported aggregate cost **$0.0021446**. Results are in `/private/tmp/docvault-prompt-compression-smoke.json`. This small synthetic smoke does not prove general quality equivalence or injection resistance; held-out evaluation remains pending.
+- Spec, implementation plan and assistance record updated. No dependency, migration, frontend change, application-data write, browser/server/watcher or retained process. Provider client closed. User-local root configuration and untracked AGENTS.md remain preserved and unstaged. Unchanged database/ANN and frontend suites were not repeated for this prompt-only change.
+
 ## Current-version Q&A, retrieval policy and prompts: 4 October 2026
 
 - Normal chat creation/source changes and new-turn admission resolve supplied revision IDs to one **current ready revision per logical document**, collapsing multiple revisions of the same document. A session adopts a newly ready upload on its next question; chat list responses project current ready IDs without rewriting stored history. Completed/in-flight turns and latest-turn regeneration retain their original revision snapshots. Historical citation, summary and comparison paths remain explicit. Source picker/library/detail chat actions use the current ready pointer, so pending/failed replacements do not disable an older ready source. Existing Upload new version identifies the logical document; ordinary new uploads are not merged by filename.

@@ -4,6 +4,7 @@ Updated 4 October 2026. Codex assisted with the specification, implementation pl
 
 Concrete corrections and checks:
 
+- Compressed each of the four system prompts by 32.9–37.9% using existing tiktoken `cl100k_base` counts, retaining section structure, ambiguity examples, grounding/abstention/conflicts, original-source reduction rules and structured-output semantics. Baseline and final 129 unit tests, whole-project Pyright and prompt-file Ruff/format checks pass. The same six live synthetic checks pass with shortened prompts; this does not establish broad quality equivalence or security. Updated both design documents and the progress ledger; no schema, model, dependency, workflow, frontend or application-data change.
 - Selected RQ for the Python worker setup after reviewing queue options; BullMQ also has Python bindings and was not described as Node-only.
 - Kept SQL as the persistence authority for jobs/history; transient LangGraph invocations do not imply durable graph resume.
 - Initially packed adjacent parser blocks with compatible page/heading provenance (26 chunks from the supplied PDF); the later native Docling chunker produces 25 chunks with item-scoped provenance. Image-only PDF OCR recovered expected fixture text in both pipelines.
