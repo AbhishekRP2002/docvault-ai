@@ -17,7 +17,7 @@ Delivery is staged, but the target includes every bonus item in section 13. The 
 | Topic | Initial decision |
 |---|---|
 | Deadline | Awaiting user input; milestones are ordered without assuming a submission date. |
-| Providers | OpenRouter for generation and embeddings through the OpenAI Python SDK, with `base_url=https://openrouter.ai/api/v1`. Independent task configurations: chat/summaries default to `openai/gpt-4.1-mini`, rewriting to `openai/gpt-4.1-nano`, comparisons to `openai/gpt-4.1`, embeddings to `openai/text-embedding-3-small`. Each is environment-overridable; actual account/model checks are recorded in the ledger. The user reports the provider key is configured in local `.env`; keep it server-side. |
+| Providers | OpenRouter for generation and embeddings through the OpenAI Python SDK, with `base_url=https://openrouter.ai/api/v1`. Independent task configurations: the application chat default is `openai/gpt-6-luna`, summaries default to `openai/gpt-4.1-mini`, input-query rewriting to `openai/gpt-4.1-nano`, comparisons to `openai/gpt-4.1`, embeddings to `openai/text-embedding-3-small`. Each is environment-overridable; the application chat override is not a newly verified provider/model choice. Actual account/model checks are recorded in the ledger. The user reports the provider key is configured in local `.env`; keep it server-side. |
 | Deployment | Reproducible localhost Docker Compose demo. Bind published service ports to loopback. Public deployment is outside the current scope. |
 | Formats | PDF, DOCX, UTF-8 TXT; digital and scanned PDFs. English is the first tested language. Other languages are best effort and clearly labeled. |
 | Limits | Configurable upload safeguards: 25 MiB/file, 100 PDF pages, 10 files/batch, 100 MiB total/batch. No extracted-token cap per file and no fixed maximum selected versions for chat/comparison. Evidence-token tuning is deferred; provider context/input limits still apply explicitly. |
@@ -49,6 +49,10 @@ Current implementation and verification status are recorded in [progress.md](pro
 
 UI states include empty library, upload progress, queued/processing, ready, failed, missing evidence, budget exhausted, stream interruption, and retry. Upload acceptance, processing readiness, and completed generation are separate successes.
 
+Files uses a compact table with inline upload/processing states. Transfer state survives route navigation; only server-confirmed documents enter the canonical list. Failed transfers expose an inline retry. Select controls use the installed Radix primitives, and route/detail loading states use skeletons with reduced-motion support. The Columns menu persists visibility locally: default columns are latest-attempt start, processing time, ingestion run ID, pages, chunks, and source-file size. Optional columns include added/finished timestamps, attempts, content tokens, parser, and embedding model. Missing values remain unknown. Processing time excludes upload, queue wait, retry backoff, and insight generation; manual retries clear timing until a new attempt starts.
+
+Usage displays stored daily LLM requests, input/output tokens, reported costs, and model breakdowns over 7/30/90 days. Day boundaries are UTC; empty dates have zero activity, unknown-only costs are null chart gaps, and partial known costs show unknown-call counts. Processing distribution is separately labeled all-time. These implemented views do not satisfy the remaining quota, reconciliation, or performance acceptance gates.
+
 ## 3. Architecture and dependencies
 
 Use a modular monolith with separate API, worker, and small dispatcher processes from one Python package. LangGraph expresses workflow stages and conditional paths; business behavior remains in small functions with explicit inputs. Introduce interfaces only at the storage, model, queue, and persistence boundaries.
@@ -77,7 +81,7 @@ flowchart LR
 | Jobs | RQ + Redis: ordinary Python task functions and bounded retry behavior. A small dispatcher recovers committed work not yet enqueued. |
 | Workflows | LangGraph `StateGraph` compiled once and invoked with request/job state. Ingestion: parse -> chunk -> embed -> activate. Chat: load context -> rewrite if needed -> retrieve -> generate -> validate -> persist. Insights/comparison reuse the same functions and artifact/job contracts. |
 | Parsing | Docling standard pipeline, explicit OCR engine configuration, local cached model assets. Validate CPU/RAM needs in milestone 0. |
-| LLM | OpenAI Python SDK pointed at OpenRouter. Configurable `openai/gpt-4.1-mini` generation and `openai/text-embedding-3-small` embeddings, initially 1,536 dimensions after verification. |
+| LLM | OpenAI Python SDK pointed at OpenRouter. Independently configurable task models listed above and `openai/text-embedding-3-small` embeddings, initially 1,536 dimensions after verification. |
 | Storage | Private local volume shared by API/worker on the single demo host; a small storage interface permits S3 later. Local storage is sufficient for the assignment. |
 | Cache | Redis TTL keys for embedding inputs and exact response reuse; PostgreSQL remains authoritative. |
 | UI | React + TypeScript + Vite + assistant-ui + shadcn/ui. Fetch JSON/SSE directly from FastAPI; use shared or generated API types where practical. |
@@ -295,6 +299,7 @@ All `/v1` endpoints serve the same unauthenticated local workspace. Collections 
 | `GET /v1/metrics/documents` | Logical document/version counts, status counts, formats, bytes, categories. |
 | `GET /v1/metrics/processing` | Attempt/document outcomes, stage duration percentiles, queue age, retry counts, throughput over explicit time window. |
 | `GET /v1/metrics/usage` | Actual token usage where known, estimated cost, reservations, budget, cache hits. |
+| `GET /v1/metrics/usage/history?days=30` | Implemented read-only UTC daily stored usage with zero-filled dates, explicit unknown/partial cost semantics, period totals, and the twenty most active models; accepts 1–90 days. Budget reservations and expanded accounting remain separate pending work. |
 | `WS /v1/events` | Local processing/insight/comparison and chat lifecycle updates; origin checks and snapshot reconciliation. |
 | `GET /health/live`, `GET /health/ready` | Liveness; bounded DB/Redis/storage checks plus recent worker heartbeat for readiness. |
 | `GET /metrics` | Local operational metrics export; avoid document/chat IDs as metric labels. |

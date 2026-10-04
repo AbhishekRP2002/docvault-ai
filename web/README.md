@@ -15,11 +15,15 @@ bun test src/lib
 bun run build
 ```
 
-Files: batch upload with transfer progress, processing status, search, list/grid view, document insights with citations, versions, customized summaries, and multi-document comparisons. Select ready documents to create a scoped conversation.
+Files: compact table with immediate upload rows, transfer progress, live processing status, inline upload errors/retry, search, sorting, and list/grid views. Uploads stay visible across page navigation. Document insights with citations, versions, customized summaries, and multi-document comparisons remain available. Select ready documents to create a scoped conversation.
+
+The Files table includes Started at, Processing time, Run ID, Pages, Chunks, and Size. Use **Columns** to show Added at, Finished at, Attempts, Content tokens, Parser, or Embedding model; choices persist in this browser. Search accepts ingestion run IDs, and clicking an ID copies its full value. Timing describes the latest ingestion attempt, excluding upload, queue wait, retry backoff, and insight generation. Run IDs stay stable across retries; manual retries reset the attempt count. Unknown metadata displays a dash. Restart an already-running API to expose these additional document fields.
 
 Agent: New Run and collapsible, searchable Past Runs in the main sidebar. Each past run has a hover/focus/touch-accessible menu for rename and confirmed deletion. The composer uses a + source-picker button; a small sparkle accompanies the new-run heading. One main canvas holds persisted sessions, searchable source selection, streaming responses, up to three suggestions, citations, stop, and regeneration of the latest answer. A stopped or disconnected browser does not imply that server processing stopped; Stop calls the cancellation endpoint explicitly.
 
-Usage: persisted document, processing, token, and cost metrics. Missing provider cost is shown explicitly.
+Usage: interactive daily request, token, and reported-cost charts with 7/30/90-day ranges, keyboard/pointer inspection, model breakdown, and all-time processing metrics. Missing provider cost is shown explicitly and does not become a zero-cost data point. The new `/v1/metrics/usage/history` endpoint requires restarting an already-running API after pulling the changes.
+
+The [5 October design audit](../docs/design-audit-2026-10-05.md) records the Extend/Linear/YC reference principles, implementation, automated results, browser evidence, and remaining validation boundaries. Status, sort, version, and summary selectors now use local shadcn-style Radix components. Routes, document details, and comparison results load lazily with skeleton states and reduced-motion support.
 
 The source selector loads every page of the document library; it has no hidden document-count cap.
 
