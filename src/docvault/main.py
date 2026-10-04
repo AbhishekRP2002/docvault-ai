@@ -105,7 +105,8 @@ async def record_request_metrics(request: Request, call_next):
             },
         )
     duration = (time.monotonic() - start) * 1000
-    route = getattr(request.scope.get("route"), "path", "unmatched")
+    route_path = getattr(request.scope.get("route"), "path", None)
+    route = route_path if isinstance(route_path, str) else "unmatched"
     if route.startswith("/v1/"):
         bucket = datetime.now(UTC).strftime("%Y-%m-%dT%H")
         with contextlib.suppress(Exception):
@@ -156,7 +157,11 @@ def check_readiness():
     try:
         checks["redis"] = bool(redis_client().ping())
         heartbeat = redis_client().get("docvault:worker:heartbeat")
-        checks["worker"] = bool(heartbeat and time.time() - float(heartbeat) < 120)
+        checks["worker"] = (
+            isinstance(heartbeat, (str, bytes, bytearray))
+            and bool(heartbeat)
+            and time.time() - float(heartbeat) < 120
+        )
     except Exception:
         checks["redis"], checks["worker"] = False, False
     checks["storage"] = get_settings().storage_path.is_dir()

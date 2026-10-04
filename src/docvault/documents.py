@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from docvault.cache import calculate_json_fingerprint, notify_change
 from docvault.db import session
@@ -10,12 +11,12 @@ from docvault.models import Document, Idempotency, Job, Version, now
 from docvault.storage import resolve_storage_path
 
 
-def acquire_upload_advisory_lock(db, key: str):
+def acquire_upload_advisory_lock(db: Session, key: str) -> None:
     """Acquire a transaction-scoped PostgreSQL advisory lock derived from a request key."""
     db.execute(select(func.pg_advisory_xact_lock(int(calculate_json_fingerprint(key)[:15], 16))))
 
 
-def require_document(db, document_id: str, *, lock=False) -> Document:
+def require_document(db: Session, document_id: str, *, lock: bool = False) -> Document:
     """Return an undeleted document, optionally row-locking it, or raise a not-found error."""
     query = select(Document).where(Document.id == document_id, Document.deleted_at.is_(None))
     if lock:
@@ -26,7 +27,7 @@ def require_document(db, document_id: str, *, lock=False) -> Document:
     return doc
 
 
-def require_version(db, version_id: str, *, ready=False) -> Version:
+def require_version(db: Session, version_id: str, *, ready: bool = False) -> Version:
     """Return a version of an undeleted document and optionally require a ready index."""
     version = db.scalar(
         select(Version)
@@ -42,7 +43,7 @@ def require_version(db, version_id: str, *, ready=False) -> Version:
     return version
 
 
-def require_versions(db, version_ids: list[str], *, ready=True) -> list[Version]:
+def require_versions(db: Session, version_ids: list[str], *, ready: bool = True) -> list[Version]:
     """Validate a nonempty selection and resolve unique versions in the supplied order."""
     if not version_ids:
         raise AppError(422, "documents_required", "Select at least one document.")
@@ -51,9 +52,14 @@ def require_versions(db, version_ids: list[str], *, ready=True) -> list[Version]
     ]
 
 
-def serialize_document_response(db, doc: Document, version: Version | None = None) -> dict:
+def serialize_document_response(db: Session, doc: Document, version: Version | None = None) -> dict:
     """Build a library payload from a document and its supplied or latest version."""
-    version = version or db.get(Version, doc.latest_version_id)
+    if version is None and doc.latest_version_id is not None:
+        version = db.get(Version, doc.latest_version_id)
+    if version is None:
+        raise AppError(
+            409, "document_not_ready", "This document has no available uploaded version yet."
+        )
     insights = version.insights or {}
     return dict(
         id=doc.id,

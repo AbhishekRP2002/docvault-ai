@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
+from support import require_persisted_row
 
 from docvault import cache, config, jobs, processing
 from docvault import db as database
@@ -69,7 +70,11 @@ def isolated_db(monkeypatch, tmp_path):
 
 def seed_version(content="Payment is due in 30 days.", document_id=None, number=1):
     with database.session() as db, db.begin():
-        document = db.get(Document, document_id) if document_id else Document(title="Contract")
+        document = (
+            require_persisted_row(db, Document, document_id)
+            if document_id
+            else Document(title="Contract")
+        )
         if not document_id:
             db.add(document)
             db.flush()
@@ -138,22 +143,25 @@ def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated
     jobs.run_job(job_id)
     jobs.run_job(job_id)  # Duplicate queue delivery must not make a second provider call.
     with database.session() as db:
-        version = db.get(Version, version_id)
+        version = require_persisted_row(db, Version, version_id)
         assert version.status == "ready" and version.chunk_count == 1
-        assert db.get(Document, document_id).current_version_id == version_id
-        assert db.get(Job, job_id).status == "complete"
-        assert db.scalar(select(Chunk).where(Chunk.version_id == version_id)).embedding is not None
+        assert require_persisted_row(db, Document, document_id).current_version_id == version_id
+        assert require_persisted_row(db, Job, job_id).status == "complete"
+        chunk = db.scalar(select(Chunk).where(Chunk.version_id == version_id))
+        assert chunk is not None and chunk.embedding is not None
         insight_job = db.scalar(
             select(Job).where(Job.kind == "insights", Job.resource_id == version_id)
         )
+        assert insight_job is not None
         assert insight_job.status == "queued" and version.insight_status == "pending"
         insight_job_id = insight_job.id
     assert len(llm.batches) == 1
     assert processing.get_parsed_document_path(version_id).exists()
     jobs.run_job(insight_job_id)
     with database.session() as db:
-        version = db.get(Version, version_id)
+        version = require_persisted_row(db, Version, version_id)
         assert version.status == "ready" and version.insight_status == "ready"
+        assert version.insights is not None
         assert version.insights["summary"] == "Payment is due in 30 days."
         persisted_insight = version.insights["key_insights"][0]
         assert persisted_insight["text"] == "Payment term"
@@ -161,7 +169,7 @@ def test_ingest_persists_complete_index_and_insights_are_a_separate_job(isolated
         assert persisted_insight["citation_ids"]
     # Simulate a crash after publishing insights but before acknowledging the job.
     with database.session() as db, db.begin():
-        db.get(Job, insight_job_id).status = "queued"
+        require_persisted_row(db, Job, insight_job_id).status = "queued"
     jobs.run_job(insight_job_id)
     assert llm.generations == 1
 
@@ -201,7 +209,7 @@ def test_summary_artifact_persists_after_guarded_lookups(
         artifact_id, job_id = artifact.id, job.id
     jobs.run_job(job_id)
     with database.session() as db:
-        artifact = db.get(Artifact, artifact_id)
+        artifact = require_persisted_row(db, Artifact, artifact_id)
         assert artifact is not None and artifact.status == "ready"
         assert artifact.data is not None
         assert artifact.data["summary"] == "Payment is due in 30 days."
@@ -209,7 +217,7 @@ def test_summary_artifact_persists_after_guarded_lookups(
             identity
         )
         assert artifact.data["generation"]["model_config"]["model"] == "test/summary"
-        job = db.get(Job, job_id)
+        job = require_persisted_row(db, Job, job_id)
         assert job is not None and job.status == "complete"
     assert llm.generations == 1
 
@@ -225,18 +233,18 @@ def test_retry_reuses_completed_embedding_batches(isolated_db, monkeypatch):
     _, version_id, job_id = seed_version(content)
     jobs.run_job(job_id)
     with database.session() as db, db.begin():
-        assert db.get(Job, job_id).status == "queued"
+        assert require_persisted_row(db, Job, job_id).status == "queued"
         completed = db.scalar(
             select(func.count())
             .select_from(Chunk)
             .where(Chunk.version_id == version_id, Chunk.embedding.is_not(None))
         )
         assert completed == 64
-        db.get(Job, job_id).next_at = now()
+        require_persisted_row(db, Job, job_id).next_at = now()
     jobs.run_job(job_id)
     with database.session() as db:
-        assert db.get(Version, version_id).status == "ready"
-        assert db.get(Job, job_id).attempts == 2
+        assert require_persisted_row(db, Version, version_id).status == "ready"
+        assert require_persisted_row(db, Job, job_id).attempts == 2
         attempts = list(
             db.scalars(
                 select(JobAttempt).where(JobAttempt.job_id == job_id).order_by(JobAttempt.attempt)
@@ -250,7 +258,7 @@ def test_chunker_upgrade_reparses_old_cached_artifacts(isolated_db, monkeypatch)
     monkeypatch.setattr(processing, "create_llm_client", lambda resource: FakeLLM())
     _, version_id, job_id = seed_version()
     with database.session() as db:
-        version = db.get(Version, version_id)
+        version = require_persisted_row(db, Version, version_id)
         old_fingerprint = cache.calculate_json_fingerprint(
             {
                 "sha256": version.sha256,
@@ -280,7 +288,7 @@ def test_chunker_upgrade_reparses_old_cached_artifacts(isolated_db, monkeypatch)
     refreshed = processing._load_cached_parsed_document(version_id, new_fingerprint)
     assert refreshed is not None and refreshed.text == "Payment is due in 30 days."
     with database.session() as db:
-        assert db.get(Version, version_id).status == "ready"
+        assert require_persisted_row(db, Version, version_id).status == "ready"
         assert all("Old cached" not in text for text in db.scalars(select(Chunk.text)))
 
 
@@ -291,8 +299,8 @@ def test_older_completed_version_does_not_replace_newer_ready_version(isolated_d
     jobs.run_job(second_job)
     jobs.run_job(first_job)
     with database.session() as db:
-        assert db.get(Version, first_id).status == "ready"
-        assert db.get(Document, document_id).current_version_id == second_id
+        assert require_persisted_row(db, Version, first_id).status == "ready"
+        assert require_persisted_row(db, Document, document_id).current_version_id == second_id
 
 
 def test_expired_claim_is_fenced_before_recovery_dispatch(isolated_db, monkeypatch):
@@ -308,13 +316,15 @@ def test_expired_claim_is_fenced_before_recovery_dispatch(isolated_db, monkeypat
     monkeypatch.setattr(jobs, "Queue", Queue)
     _, _, job_id = seed_version()
     old_token = jobs._claim_pending_job(job_id)
+    assert old_token is not None
     with database.session() as db, db.begin():
-        db.get(Job, job_id).lease_until = now() - timedelta(seconds=1)
+        require_persisted_row(db, Job, job_id).lease_until = now() - timedelta(seconds=1)
     assert jobs.dispatch_pending_jobs() == 1
     assert len(published) == 1
     with database.session() as db, db.begin(), pytest.raises(jobs.LostClaim):
         jobs.job_checkpoint(db, job_id, old_token)
     new_token = jobs._claim_pending_job(job_id)
+    assert new_token is not None
     assert new_token > old_token
     with database.session() as db, db.begin():
         assert jobs.job_checkpoint(db, job_id, new_token).attempts == 2
@@ -329,24 +339,24 @@ def test_deleted_source_cannot_publish_embedding_and_cleanup_removes_owned_files
 
     async def delete_during_embed(texts):
         with database.session() as db, db.begin():
-            db.get(Document, document_id).deleted_at = now()
+            require_persisted_row(db, Document, document_id).deleted_at = now()
         return await original(texts)
 
     llm.embed_texts = delete_during_embed
     monkeypatch.setattr(processing, "create_llm_client", lambda resource: llm)
     jobs.run_job(job_id)
     with database.session() as db, db.begin():
-        assert db.get(Job, job_id).status == "cancelled"
-        assert db.get(Document, document_id).current_version_id is None
-        key = db.get(Version, version_id).storage_key
+        assert require_persisted_row(db, Job, job_id).status == "cancelled"
+        assert require_persisted_row(db, Document, document_id).current_version_id is None
+        key = require_persisted_row(db, Version, version_id).storage_key
         cleanup = Job(kind="cleanup", resource_id=document_id)
         db.add(cleanup)
         db.flush()
         cleanup_id = cleanup.id
     jobs.run_job(cleanup_id)
     with database.session() as db:
-        assert db.get(Job, cleanup_id).status == "complete"
-        assert db.get(Version, version_id).status == "deleted"
+        assert require_persisted_row(db, Job, cleanup_id).status == "complete"
+        assert require_persisted_row(db, Version, version_id).status == "deleted"
         assert (
             db.scalar(select(func.count()).select_from(Chunk).where(Chunk.version_id == version_id))
             == 0
@@ -370,8 +380,8 @@ def test_heartbeat_keeps_a_slow_runner_claimed(isolated_db, monkeypatch):
     _, version_id, job_id = seed_version()
     jobs.run_job(job_id)
     with database.session() as db:
-        assert db.get(Job, job_id).status == "complete"
-        assert db.get(Version, version_id).status == "ready"
+        assert require_persisted_row(db, Job, job_id).status == "complete"
+        assert require_persisted_row(db, Version, version_id).status == "ready"
 
 
 def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
@@ -379,7 +389,7 @@ def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
     token = jobs._claim_pending_job(job_id)
     assert token is not None
     with database.session() as db, db.begin():
-        job = db.get(Job, job_id)
+        job = require_persisted_row(db, Job, job_id)
         assert job is not None
         job.token += 1
         lease = job.lease_until
@@ -397,7 +407,7 @@ def test_heartbeat_stops_when_its_claim_has_been_reassigned(isolated_db):
     jobs._renew_job_lease(job_id, token, stop)
     assert stop.waits == 1
     with database.session() as db:
-        job = db.get(Job, job_id)
+        job = require_persisted_row(db, Job, job_id)
         assert job is not None and job.lease_until == lease
 
 
@@ -413,14 +423,14 @@ def test_only_transient_failures_retry_and_stop_after_three_attempts(isolated_db
     for _ in range(3):
         jobs.run_job(job_id)
         with database.session() as db, db.begin():
-            db.get(Job, job_id).next_at = now()
+            require_persisted_row(db, Job, job_id).next_at = now()
     with database.session() as db:
-        assert db.get(Job, job_id).status == "failed"
-        assert db.get(Job, job_id).attempts == 3
-        assert db.get(Version, version_id).status == "failed"
+        assert require_persisted_row(db, Job, job_id).status == "failed"
+        assert require_persisted_row(db, Job, job_id).attempts == 3
+        assert require_persisted_row(db, Version, version_id).status == "failed"
     jobs.retry_job(job_id)
     with database.session() as db:
-        assert db.get(Job, job_id).status == "queued"
+        assert require_persisted_row(db, Job, job_id).status == "queued"
 
 
 def test_real_rq_delivery_executes_claimed_job(isolated_db, monkeypatch):
@@ -438,8 +448,8 @@ def test_real_rq_delivery_executes_claimed_job(isolated_db, monkeypatch):
         worker = SimpleWorker([queue], connection=connection)
         worker.work(burst=True, logging_level="WARNING")
         with database.session() as db:
-            assert db.get(Job, job_id).status == "complete"
-            assert db.get(Version, version_id).status == "ready"
+            assert require_persisted_row(db, Job, job_id).status == "complete"
+            assert require_persisted_row(db, Version, version_id).status == "ready"
     finally:
         queue.delete(delete_jobs=True)
 
@@ -466,9 +476,10 @@ def test_dispatcher_recovers_stale_generation_without_interrupting_live_stream(
     assert jobs.dispatch_pending_jobs() == 0
     assert notifications == [True]
     with database.session() as db, db.begin():
-        assert db.get(Message, old_id).status == "failed"
-        assert "retry" in db.get(Message, old_id).error
-        assert db.get(Message, live_id).status == "streaming"
+        stale_message = require_persisted_row(db, Message, old_id)
+        assert stale_message.status == "failed"
+        assert stale_message.error is not None and "retry" in stale_message.error
+        assert require_persisted_row(db, Message, live_id).status == "streaming"
         # The stale generation no longer occupies the partial unique constraint.
         db.add(Message(chat_id=old_chat_id, role="assistant", status="pending"))
     # With nothing stale or queued, an empty RETURNING result causes no update event.
@@ -498,8 +509,8 @@ def test_changed_generation_configuration_rejects_queued_artifact_before_llm_cal
         artifact_id, job_id = artifact.id, job.id
     jobs.run_job(job_id)
     with database.session() as db:
-        artifact = db.get(Artifact, artifact_id)
+        artifact = require_persisted_row(db, Artifact, artifact_id)
         assert artifact.status == "failed" and artifact.data is None
-        assert "configuration changed" in artifact.error
-        assert db.get(Job, job_id).status == "failed"
+        assert artifact.error is not None and "configuration changed" in artifact.error
+        assert require_persisted_row(db, Job, job_id).status == "failed"
     assert llm.generations == 0

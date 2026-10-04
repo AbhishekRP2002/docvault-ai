@@ -3,16 +3,12 @@
 import re
 
 import pytest
-from docling_core.types.doc import (
-    BoundingBox,
-    ContentLayer,
-    DocItemLabel,
-    DoclingDocument,
-    ProvenanceItem,
-    Size,
-    TableCell,
-    TableData,
-)
+from docling_core.types.doc.base import BoundingBox, Size
+from docling_core.types.doc.common.content_layer import ContentLayer
+from docling_core.types.doc.common.reference import ProvenanceItem
+from docling_core.types.doc.document import DoclingDocument
+from docling_core.types.doc.items.table.table_data import TableCell, TableData
+from docling_core.types.doc.labels import DocItemLabel
 
 from docvault.llm.parsing import chunk_docling_document, parse_text_document
 from docvault.llm.provider import ContextLimitError, token_count

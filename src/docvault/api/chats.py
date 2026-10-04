@@ -11,6 +11,7 @@ from docvault.chat import (
     generate_assistant_response,
     load_visible_chat_messages,
     require_chat,
+    require_message,
     reserve_assistant_response,
     serialize_message_response,
     stream_message_events,
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/v1/chats", tags=["chats"])
 RequestKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
 
-def serialize_chat_response(chat):
+def serialize_chat_response(chat: Chat) -> dict:
     """Serialize a chat's identity, selected versions, and timestamps for the API."""
     return dict(
         id=chat.id,
@@ -116,10 +117,7 @@ def get_chat_message(chat_id: str, message_id: str):
     """Return one persisted message, rejecting IDs outside the requested chat."""
     with session() as db:
         require_chat(db, chat_id)
-        item = db.get(Message, message_id)
-        if not item or item.chat_id != chat_id:
-            raise AppError(404, "message_not_found", "Message not found.")
-        return serialize_message_response(item)
+        return serialize_message_response(require_message(db, message_id, chat_id))
 
 
 async def _respond_to_chat_request(
@@ -153,7 +151,7 @@ async def _respond_to_chat_request(
 
         await generate_assistant_response(identifier, _discard_generation_event)
     with session() as db:
-        return serialize_message_response(db.get(Message, identifier))
+        return serialize_message_response(require_message(db, identifier, chat_id))
 
 
 @router.post("/{chat_id}/messages")

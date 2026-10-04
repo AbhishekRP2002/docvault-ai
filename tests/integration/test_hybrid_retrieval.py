@@ -16,6 +16,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, func, insert, inspect, select, text
 from sqlalchemy.engine import make_url
+from support import require_persisted_row
 
 from docvault import config, retrieval
 from docvault import db as database
@@ -265,7 +266,9 @@ def test_hnsw_default_plan_filtered_recall_and_keyword_rescue(migrated_database)
     with database.session() as db:
         retrieval.configure_hnsw_search(db)
         compiled = statement.compile(db.bind, compile_kwargs={"literal_binds": True})
-        plan = db.scalar(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + str(compiled)))[0]
+        plan_result = db.scalar(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + str(compiled)))
+        assert plan_result is not None
+        plan = plan_result[0]
         assert "ix_chunks_embedding_hnsw" in plan_indexes(plan["Plan"])
         approximate = list(db.scalars(statement))
         assert len(approximate) == 30
@@ -285,7 +288,10 @@ def test_hnsw_default_plan_filtered_recall_and_keyword_rescue(migrated_database)
             f"execution_ms={plan['Execution Time']:.3f}"
         )
         assert recall >= 0.9
-        distances = [1 - chunk.embedding[0] for chunk in approximate]
+        distances = []
+        for chunk in approximate:
+            assert chunk.embedding is not None
+            distances.append(1 - chunk.embedding[0])
         assert distances == sorted(distances)
         assert db.scalar(text("SHOW hnsw.ef_search")) == "200"
         assert db.scalar(text("SHOW hnsw.iterative_scan")) == "strict_order"
@@ -306,13 +312,13 @@ def test_source_validation_precedes_embedding(migrated_database, invalid):
     version_id = seed_version()
     version_ids = [version_id]
     with database.session() as db, db.begin():
-        version = db.get(Version, version_id)
+        version = require_persisted_row(db, Version, version_id)
         if invalid == "empty":
             version_ids = []
         elif invalid == "missing":
             version_ids = [str(uuid4())]
         elif invalid == "deleted":
-            db.get(Document, version.document_id).deleted_at = now()
+            require_persisted_row(db, Document, version.document_id).deleted_at = now()
         elif invalid == "processing":
             version.status = "embedding"
         else:
@@ -346,14 +352,16 @@ def test_scope_revalidated_after_embedding_and_cache_reused(migrated_database, m
         async def embed_texts(self, texts):
             """Change the indexed model while the query embedding request is in flight."""
             with database.session() as db, db.begin():
-                db.get(Version, version_id).embedding_model = "changed-during-request"
+                require_persisted_row(
+                    db, Version, version_id
+                ).embedding_model = "changed-during-request"
             return await super().embed_texts(texts)
 
     with pytest.raises(AppError, match="different embedding model"):
         asyncio.run(retrieval.retrieve_relevant_chunks("payment", [version_id], MutatingLLM()))
     with database.session() as db, db.begin():
-        db.get(
-            Version, version_id
+        require_persisted_row(
+            db, Version, version_id
         ).embedding_model = config.get_settings().openrouter_embedding_model
         db.add(Chunk(**chunk_row(version_id, 0, QUERY_VECTOR, "Payment is due in 30 days.")))
     llm = FixedEmbeddingLLM()

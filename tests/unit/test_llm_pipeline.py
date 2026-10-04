@@ -2,9 +2,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from openai.types import CreateEmbeddingResponse
 from pydantic import ValidationError
 
-from docvault.llm.config import GenerationModelConfig, LLMSettings
+from docvault.llm.config import GenerationModelConfig, LLMSettings, LLMTask
 from docvault.llm.graphs import (
     InvalidCitationError,
     QuestionRewriteLLMResponse,
@@ -18,6 +19,7 @@ from docvault.llm.parsing import (
     parse_document_file,
     parse_text_document,
 )
+from docvault.llm.protocols import DeltaCallback, ResponseModel
 from docvault.llm.provider import (
     OpenRouterLLM,
     ProviderError,
@@ -94,7 +96,8 @@ def test_txt_citations_refer_to_exact_lines_and_characters(tmp_path):
 def test_tables_repeat_headers_and_preserve_all_rows():
     import re
 
-    from docling_core.types.doc import DoclingDocument, TableCell, TableData
+    from docling_core.types.doc.document import DoclingDocument
+    from docling_core.types.doc.items.table.table_data import TableCell, TableData
 
     from docvault.llm.parsing import chunk_docling_document
 
@@ -129,13 +132,10 @@ def test_tables_repeat_headers_and_preserve_all_rows():
 
 
 def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeypatch, tmp_path):
-    from docling_core.types.doc import (
-        BoundingBox,
-        DocItemLabel,
-        DoclingDocument,
-        ProvenanceItem,
-        Size,
-    )
+    from docling_core.types.doc.base import BoundingBox, Size
+    from docling_core.types.doc.common.reference import ProvenanceItem
+    from docling_core.types.doc.document import DoclingDocument
+    from docling_core.types.doc.labels import DocItemLabel
 
     from docvault.llm import parsing
 
@@ -171,7 +171,12 @@ def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeyp
 
 
 class ChatLLM:
-    def __init__(self, answer=None, rewrite=None):
+    def __init__(
+        self,
+        answer: ChatGenerationLLMResponse | None = None,
+        rewrite: QuestionRewriteLLMResponse | None = None,
+    ):
+        """Configure deterministic chat and rewrite results without a provider connection."""
         self.answer = answer or ChatGenerationLLMResponse(
             response="Payment is due in 30 days. [c1]",
             suggestions=["When does it renew?"],
@@ -181,12 +186,19 @@ class ChatLLM:
         self.rewrite = rewrite
         self.generations = 0
 
-    async def generate_structured_response(self, schema, messages, *, task):
+    async def generate_structured_response(
+        self, schema: type[ResponseModel], messages: list[dict], *, task: LLMTask
+    ) -> ResponseModel:
+        """Validate the configured rewrite against the workflow-requested schema."""
         assert schema is QuestionRewriteLLMResponse
         assert task == "rewrite"
-        return self.rewrite
+        assert self.rewrite is not None
+        return schema.model_validate(self.rewrite.model_dump())
 
-    async def stream_structured_answer(self, messages, on_delta):
+    async def stream_structured_answer(
+        self, messages: list[dict], on_delta: DeltaCallback
+    ) -> ChatGenerationLLMResponse:
+        """Emit the configured answer once and return the same validated response."""
         self.generations += 1
         await on_delta(self.answer.response)
         return self.answer
@@ -297,7 +309,9 @@ async def test_graph_rejects_invented_citation_ids():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batch_size", [64, 16])
-async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(batch_size):
+async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(
+    batch_size, monkeypatch
+):
     llm = OpenRouterLLM(
         LLMSettings(
             _env_file=None,
@@ -311,13 +325,19 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(batc
     async def create(**kwargs):
         requests.append(kwargs)
         items = [
-            SimpleNamespace(index=i, embedding=[float(i), 1.0]) for i in range(len(kwargs["input"]))
+            {"object": "embedding", "index": i, "embedding": [float(i), 1.0]}
+            for i in range(len(kwargs["input"]))
         ]
-        return SimpleNamespace(
-            data=list(reversed(items)), model_dump=lambda: {"usage": {"prompt_tokens": 3}}
+        return CreateEmbeddingResponse.model_validate(
+            {
+                "object": "list",
+                "model": "test/embedding",
+                "data": list(reversed(items)),
+                "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            }
         )
 
-    llm.client.embeddings.create = create
+    monkeypatch.setattr(llm.client.embeddings, "create", create)
     try:
         vectors = await llm.embed_texts([f"Text {i}" for i in range(65)])
         assert vectors == [[float(index % batch_size), 1.0] for index in range(65)]
@@ -334,33 +354,42 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(batc
 
 
 class SummaryLLM:
-    def generation_model(self, task):
+    def generation_model(self, task: LLMTask) -> GenerationModelConfig:
+        """Use a small validated context to exercise recursive map and reduction."""
         return GenerationModelConfig(
             model=f"test/{task}", context_tokens=4000, max_output_tokens=800
         )
 
     def __init__(self):
+        """Track each generated document-analysis request."""
         self.calls = []
 
-    async def generate_structured_response(self, schema, messages, *, task):
+    async def generate_structured_response(
+        self, schema: type[ResponseModel], messages: list[dict], *, task: LLMTask
+    ) -> ResponseModel:
+        """Validate deterministic findings against the requested analysis response schema."""
         assert task == ("comparison" if schema is ComparisonDimensionLLMResponse else "summary")
         payload = json.loads(messages[-1]["content"])
         self.calls.append(payload)
         ids = [id for section in payload["sections"] for id in section["citation_ids"]]
-        if schema is ComparisonDimensionLLMResponse:
-            return ComparisonDimensionLLMResponse(
+        if task == "comparison":
+            result = ComparisonDimensionLLMResponse(
                 finding_text="Payment terms found.", status="found", citation_ids=ids
             )
-        return InsightsGenerationLLMResponse(
-            summary="The contract defines payment terms.",
-            category="Contract",
-            tags=["payment"],
-            key_insights=[
-                CitedKeyInsight(insight_text="Payment terms are specified.", citation_ids=[ids[0]])
-            ],
-            suggestions=["When is payment due?"],
-            citation_ids=ids,
-        )
+        else:
+            result = InsightsGenerationLLMResponse(
+                summary="The contract defines payment terms.",
+                category="Contract",
+                tags=["payment"],
+                key_insights=[
+                    CitedKeyInsight(
+                        insight_text="Payment terms are specified.", citation_ids=[ids[0]]
+                    )
+                ],
+                suggestions=["When is payment due?"],
+                citation_ids=ids,
+            )
+        return schema.model_validate(result.model_dump())
 
 
 @pytest.mark.asyncio
@@ -408,7 +437,7 @@ async def test_comparison_preserves_all_selected_versions_and_reports_missing():
 
 
 @pytest.mark.asyncio
-async def test_summary_rejects_citations_invented_by_provider():
+async def test_summary_rejects_citations_invented_by_provider(monkeypatch):
     llm = SummaryLLM()
 
     async def generate_structured_response(schema, messages, *, task):
@@ -421,6 +450,6 @@ async def test_summary_rejects_citations_invented_by_provider():
             citation_ids=["invented"],
         )
 
-    llm.generate_structured_response = generate_structured_response
+    monkeypatch.setattr(llm, "generate_structured_response", generate_structured_response)
     with pytest.raises(InvalidCitationError):
         await generate_document_summary(llm, [source()])

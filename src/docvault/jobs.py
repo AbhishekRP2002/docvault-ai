@@ -13,6 +13,7 @@ from redis.exceptions import RedisError
 from rq import Queue
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from docvault.cache import notify_change, redis_client
 from docvault.config import get_settings
@@ -33,7 +34,7 @@ class SourceDeleted(RuntimeError):
     pass
 
 
-def _resolve_job_document_ids(db, job: Job) -> list[str]:
+def _resolve_job_document_ids(db: Session, job: Job) -> list[str]:
     """Resolve the source document IDs a job needs for locking and deletion checks."""
     if job.kind == "cleanup":
         return [job.resource_id]
@@ -48,7 +49,7 @@ def _resolve_job_document_ids(db, job: Job) -> list[str]:
     return list(db.scalars(select(Version.document_id).where(Version.id.in_(artifact.version_ids))))
 
 
-def job_checkpoint(db, job_id: str, token: int, stage: str | None = None) -> Job:
+def job_checkpoint(db: Session, job_id: str, token: int, stage: str | None = None) -> Job:
     """Call inside a transaction before every stage/result mutation.
 
     Lock documents before the job, matching the deletion path. Keeping the
@@ -91,7 +92,7 @@ def job_checkpoint(db, job_id: str, token: int, stage: str | None = None) -> Job
     return job
 
 
-def _update_job_resource_state(db, job: Job, state: str, error: str | None = None) -> None:
+def _update_job_resource_state(db: Session, job: Job, state: str, error: str | None = None) -> None:
     """Mirror job status and errors to its resource, preserving ready ingestion indexes."""
     if job.kind in {"ingest", "insights"}:
         version = db.get(Version, job.resource_id)
@@ -111,7 +112,7 @@ def _update_job_resource_state(db, job: Job, state: str, error: str | None = Non
             artifact.error = error
 
 
-def _finish_job_attempt(db, job: Job, status: str, error: str | None = None) -> None:
+def _finish_job_attempt(db: Session, job: Job, status: str, error: str | None = None) -> None:
     """Finish the current running attempt with its status, error, timestamp, and last stage."""
     attempt = db.scalar(
         select(JobAttempt).where(

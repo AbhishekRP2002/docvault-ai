@@ -353,7 +353,7 @@ def _activate_ready_version(job_id: str, token: int) -> None:
     notify_change()
 
 
-def load_document_version_evidence(db, version_id: str) -> list[Evidence]:
+def load_document_version_evidence(db: Session, version_id: str) -> list[Evidence]:
     """Load all chunks of a live, ready version as evidence in document order."""
     version = require_version(db, version_id, ready=True)
     chunks = db.scalars(select(Chunk).where(Chunk.version_id == version_id).order_by(Chunk.ordinal))

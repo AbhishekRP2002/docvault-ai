@@ -182,6 +182,14 @@ At message admission, copy the session's selected version IDs and active index f
 
 Keep full history in PostgreSQL and select recent context within the actual model window. If older context is excluded, expose that fact rather than silently treating an unresolved reference as understood. A later measured tuning pass may introduce evidence/history budgets; the removed arbitrary caps are not restored as hidden constants.
 
+### Type safety at application boundaries
+
+Run the whole-project Pyright configuration in `pyproject.toml` across application code, tests, migrations and scripts; require zero errors under the shared basic checking mode without diagnostic suppression. Use the configured `.venv` and `src` import path in the CLI and editor. Frontend TypeScript checking remains separate.
+
+Narrow nullable database results before reading fields or serializing responses; annotate database boundaries with SQLAlchemy Session so nullable values cannot disappear behind an untyped parameter. A document without an available latest version returns `409 document_not_ready`; a missing upload batch keeps `404 batch_not_found`. Reuse `require_message` for required message lookups, with optional chat scoping; a missing record returns the existing not-found error. Admission rejects a missing or blank question before persisting a turn. Retry checks both the original and latest user turn; generation validates the parent chat/role before provider work. Initialization errors participate in normal persisted failure handling. Legacy nullable request keys are ordinary non-retry attempts. Guard missing SSE records before constructing a start event.
+
+Treat synchronous Redis responses as untrusted runtime values: deserialize only serialized cache values, require a positive integer from the atomic rate-limit script, and validate heartbeat representations. Cache failures remain misses; admission failures remain 503 errors. Normalize nullable count/sum metrics to zero while retaining unavailable duration metrics as null. Small structural LLM protocols declare only the capabilities required by chat or analysis; real providers and typed fixtures use the same contracts. Keep expected-row assertions and optional-value narrowing in tests so a missing persisted result fails clearly.
+
 ### Structured answer and retries
 
 Centralize all system prompt templates and summary targets in `llm/prompts.py`; keep task-specific generation and embedding settings in `llm/config.py`. Rewriting, chat, summaries and comparisons independently select model, context capacity, output reservation and optional temperature. Preserve existing chat environment variables; use task-prefixed overrides for the other operations. Analysis batching follows its own task capacity. Defaults are initial task choices, not an evaluated best-model claim.

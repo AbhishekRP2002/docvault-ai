@@ -11,7 +11,7 @@ from typing import Required, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from docvault.llm.prompts import CHAT_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT
-from docvault.llm.provider import DeltaCallback, OpenRouterLLM
+from docvault.llm.protocols import ChatGenerationLLM, DeltaCallback
 from docvault.llm.types import ChatGenerationLLMResponse, Evidence, QuestionRewriteLLMResponse
 
 
@@ -46,7 +46,7 @@ async def run_document_chat_workflow(
     question: str,
     history: list[dict],
     retrieve_relevant_chunks: Callable[[str], Awaitable[list[Evidence]]],
-    llm: OpenRouterLLM,
+    llm: ChatGenerationLLM,
     on_delta: DeltaCallback,
 ) -> tuple[ChatGenerationLLMResponse, list[Evidence], str]:
     """Run question rewriting, retrieval, generation, and citation validation.

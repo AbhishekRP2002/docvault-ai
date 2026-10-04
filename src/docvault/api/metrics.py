@@ -16,7 +16,7 @@ def get_document_metrics():
         )
         rows = list(db.scalars(select(Version).join(Document).where(Document.deleted_at.is_(None))))
         return dict(
-            documents=docs,
+            documents=docs if docs is not None else 0,
             versions=len(rows),
             ready=sum(v.status == "ready" for v in rows),
             processing=sum(v.status not in {"ready", "failed"} for v in rows),
@@ -61,14 +61,21 @@ def get_llm_usage_metrics():
         ).one()
         hits = db.scalar(
             select(func.coalesce(func.sum(MetricBucket.count), 0)).where(
-                MetricBucket.key.in_(["embedding_cache_hits", "embedding_cache_hit", "parser_cache_hit", "answer_cache_hits"])
+                MetricBucket.key.in_(
+                    [
+                        "embedding_cache_hits",
+                        "embedding_cache_hit",
+                        "parser_cache_hit",
+                        "answer_cache_hits",
+                    ]
+                )
             )
         )
         return dict(
-            input_tokens=int(inputs),
-            output_tokens=int(outputs),
-            cost_usd=float(cost),
+            input_tokens=int(inputs if inputs is not None else 0),
+            output_tokens=int(outputs if outputs is not None else 0),
+            cost_usd=float(cost if cost is not None else 0),
             requests=requests,
             unknown_cost_calls=unknown,
-            cache_hits=int(hits),
+            cache_hits=int(hits if hits is not None else 0),
         )

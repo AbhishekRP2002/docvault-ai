@@ -4,6 +4,7 @@ import json
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from docvault.cache import (
     cache_get,
@@ -26,7 +27,7 @@ from docvault.retrieval import build_public_citation, retrieve_relevant_chunks
 ACTIVE_TASKS: dict[str, asyncio.Task] = {}
 
 
-def require_chat(db, chat_id: str, lock=False) -> Chat:
+def require_chat(db: Session, chat_id: str, lock: bool = False) -> Chat:
     """Return a chat, optionally row-locking it, or raise a not-found API error."""
     query = select(Chat).where(Chat.id == chat_id)
     if lock:
@@ -35,6 +36,16 @@ def require_chat(db, chat_id: str, lock=False) -> Chat:
     if not chat:
         raise AppError(404, "chat_not_found", "Chat session not found.")
     return chat
+
+
+def require_message(
+    db: Session, message_id: str | None, chat_id: str | None = None, *, lock: bool = False
+) -> Message:
+    """Return an existing message in the optional chat scope, or raise a not-found error."""
+    message = db.get(Message, message_id, with_for_update=lock) if message_id is not None else None
+    if message is None or (chat_id is not None and message.chat_id != chat_id):
+        raise AppError(404, "message_not_found", "Message not found.")
+    return message
 
 
 def serialize_message_response(message: Message) -> dict:
@@ -55,7 +66,7 @@ def serialize_message_response(message: Message) -> dict:
     )
 
 
-def load_visible_chat_messages(db, chat_id: str) -> list[Message]:
+def load_visible_chat_messages(db: Session, chat_id: str) -> list[Message]:
     """Return each user turn and its newest assistant attempt in chronological order."""
     messages = list(
         db.scalars(select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at))
@@ -101,14 +112,20 @@ def reserve_assistant_response(
             previous = db.get(Message, retry_of)
             if not previous or previous.chat_id != chat_id or previous.role != "assistant":
                 raise AppError(404, "message_not_found", "Response not found.")
-            user = db.get(Message, previous.parent_id)
+            user = db.get(Message, previous.parent_id) if previous.parent_id is not None else None
             last_user = db.scalar(
                 select(Message)
                 .where(Message.chat_id == chat_id, Message.role == "user")
                 .order_by(Message.created_at.desc())
                 .limit(1)
             )
-            if not user or user.id != last_user.id:
+            if (
+                user is None
+                or last_user is None
+                or user.id != last_user.id
+                or user.chat_id != chat_id
+                or user.role != "user"
+            ):
                 raise AppError(
                     409,
                     "retry_latest_turn",
@@ -116,14 +133,15 @@ def reserve_assistant_response(
                 )
             versions = previous.version_ids
         else:
+            if content is None or not content.strip():
+                raise AppError(422, "invalid_message", "Enter a question.")
+            question = content.strip()
             versions = chat.version_ids
-            user = Message(
-                chat_id=chat_id, role="user", content=content.strip(), version_ids=versions
-            )
+            user = Message(chat_id=chat_id, role="user", content=question, version_ids=versions)
             db.add(user)
             db.flush()
             if chat.title == "New chat":
-                chat.title = content.strip()[:80]
+                chat.title = question[:80]
         require_versions(db, versions)
         assistant = Message(
             chat_id=chat_id,
@@ -188,23 +206,7 @@ async def generate_assistant_response(message_id: str, emit_generation_event):
     """
     from docvault.integrations import create_llm_client
 
-    with session() as db, db.begin():
-        message = db.get(Message, message_id, with_for_update=True)
-        if not message or message.status != "pending":
-            return
-        message.status = "streaming"
-        message.updated_at = now()
-        user = db.get(Message, message.parent_id)
-        history = [
-            dict(role=m.role, content=m.content)
-            for m in load_visible_chat_messages(db, message.chat_id)
-            if m.created_at < user.created_at and m.status == "complete"
-        ]
-        # Retain persisted history; send recent turns without a fixed evidence-token budget.
-        history = history[-20:]
-        question, version_ids = user.content, list(message.version_ids)
-        is_retry = message.request_key.startswith("retry:")
-    llm = create_llm_client(message_id)
+    llm = None
 
     async def emit_response_delta(value: str):
         """Recheck active status, refresh its heartbeat, and emit a provisional text delta."""
@@ -216,6 +218,28 @@ async def generate_assistant_response(message_id: str, emit_generation_event):
         await emit_generation_event("answer.delta", {"text": value})
 
     try:
+        with session() as db, db.begin():
+            message = db.get(Message, message_id, with_for_update=True)
+            if not message or message.status != "pending":
+                return
+            user = require_message(db, message.parent_id, message.chat_id)
+            if user.role != "user":
+                raise AppError(
+                    409, "invalid_message_context", "The original question is unavailable."
+                )
+            message.status = "streaming"
+            message.updated_at = now()
+            history = [
+                dict(role=m.role, content=m.content)
+                for m in load_visible_chat_messages(db, message.chat_id)
+                if m.created_at < user.created_at and m.status == "complete"
+            ]
+            # Retain persisted history; send recent turns without a fixed evidence-token budget.
+            history = history[-20:]
+            question, version_ids = user.content, list(message.version_ids)
+            is_retry = message.request_key is not None and message.request_key.startswith("retry:")
+        llm = create_llm_client(message_id)
+
         settings = get_settings()
         with session() as db:
             versions = require_versions(db, version_ids)
@@ -291,7 +315,8 @@ async def generate_assistant_response(message_id: str, emit_generation_event):
         if result:
             await emit_generation_event("message.failed", {"message": result})
     finally:
-        await llm.close()
+        if llm is not None:
+            await llm.close()
 
 
 def encode_sse_event(name: str, data: dict) -> str:
@@ -305,8 +330,10 @@ async def stream_message_events(message_id: str, replay=False):
     Replay stored terminal results; cancel a newly started local generation on disconnect.
     """
     with session() as db:
-        message = db.get(Message, message_id)
-        user = db.get(Message, message.parent_id)
+        message = require_message(db, message_id)
+        user = require_message(db, message.parent_id, message.chat_id)
+        if message.role != "assistant" or user.role != "user":
+            raise AppError(409, "invalid_message_context", "The original question is unavailable.")
         started = {
             "message": serialize_message_response(message),
             "user_message": serialize_message_response(user),

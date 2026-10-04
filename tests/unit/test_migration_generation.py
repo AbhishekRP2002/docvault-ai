@@ -3,7 +3,7 @@
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import ops
-from sqlalchemy import Column, Index, MetaData, String
+from sqlalchemy import Column, Index, MetaData, String, Table
 
 from docvault.migration_generation import prepare_generated_migration
 from docvault.models import LLMCall
@@ -13,8 +13,10 @@ from docvault.models import LLMCall
 def test_ledger_rename_requires_unchanged_structure(change):
     """Fail generation rather than silently dropping a column or uniqueness change."""
     context = MigrationContext.configure(dialect_name="postgresql")
-    old_table = LLMCall.__table__.to_metadata(MetaData(), name="ai_calls")
-    new_table = LLMCall.__table__.to_metadata(MetaData())
+    table = LLMCall.__table__
+    assert isinstance(table, Table)
+    old_table = table.to_metadata(MetaData(), name="ai_calls")
+    new_table = table.to_metadata(MetaData())
     operations = [ops.CreateTableOp.from_table(new_table), ops.DropTableOp.from_table(old_table)]
     if change == "column":
         new_table.append_column(Column("new_requirement", String, nullable=False))

@@ -1,9 +1,10 @@
 """Environment-backed model selection and capacities for each LLM task."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import ENV_FILE_SENTINEL, DotenvType
 
 LLMTask = Literal["chat", "rewrite", "summary", "comparison"]
 
@@ -63,6 +64,10 @@ class LLMSettings(BaseSettings):
     openrouter_embedding_max_input_tokens: int = Field(default=8191, gt=0)
     openrouter_embedding_max_batch_inputs: int = Field(default=64, gt=0)
     openrouter_embedding_max_batch_tokens: int = Field(default=32000, gt=0)
+
+    def __init__(self, *, _env_file: DotenvType | None = ENV_FILE_SENTINEL, **values: Any) -> None:
+        """Expose the settings library's dotenv override while retaining normal validation."""
+        super().__init__(_env_file=_env_file, **values)
 
     def generation_model(self, task: LLMTask) -> GenerationModelConfig:
         """Resolve one task's model and validated input/output capacities without provider I/O."""

@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import make_url
+from support import require_persisted_row
 
 from docvault import cache, integrations
 from docvault.config import get_settings
@@ -218,13 +219,14 @@ def test_upload_persists_original_bytes_and_exactly_one_durable_job(api):
     assert response.status_code == 202, response.text
     result = response.json()
     with session() as db:
-        version = db.get(Version, result["latest_version_id"])
+        version = require_persisted_row(db, Version, result["latest_version_id"])
         assert version.document_id == result["id"]
         assert version.filename == "terms.txt"
         assert version.status == "queued"
         assert (api.storage / version.storage_key).read_bytes() == original
         assert db.scalar(select(func.count()).select_from(Job)) == 1
         job = db.scalar(select(Job))
+        assert job is not None
         assert job.resource_id == version.id and job.status == "queued"
     content = api.client.get(f"/v1/versions/{result['latest_version_id']}/content")
     assert content.status_code == 200 and content.content == original
@@ -291,12 +293,12 @@ def test_legacy_upload_replay_without_saved_result_uses_existing_document(api):
     assert first.status_code == 202, first.text
     original = first.json()
     with session() as db, db.begin():
-        record = db.get(Idempotency, "upload:new:legacy-upload")
+        record = require_persisted_row(db, Idempotency, "upload:new:legacy-upload")
         record.result = None
-        document = db.get(Document, original["id"])
+        document = require_persisted_row(db, Document, original["id"])
         document.title = "Updated legacy title"
     with session() as db:
-        assert db.get(Idempotency, "upload:new:legacy-upload").result is None
+        assert require_persisted_row(db, Idempotency, "upload:new:legacy-upload").result is None
     expected = api.client.get(f"/v1/documents/{original['id']}")
     assert expected.status_code == 200, expected.text
 
@@ -310,7 +312,7 @@ def test_legacy_upload_replay_without_saved_result_uses_existing_document(api):
         assert db.scalar(select(func.count()).select_from(Document)) == 1
         assert db.scalar(select(func.count()).select_from(Version)) == 1
         assert db.scalar(select(func.count()).select_from(Job)) == 1
-        version = db.get(Version, original["latest_version_id"])
+        version = require_persisted_row(db, Version, original["latest_version_id"])
         assert (api.storage / version.storage_key).read_bytes() == payload
     assert len([p for p in (api.storage / "sources").iterdir() if p.is_file()]) == 1
 
@@ -337,16 +339,17 @@ def test_upload_first_version_to_existing_document_without_versions(api):
         assert db.scalar(select(func.count()).select_from(Document)) == 1
         assert db.scalar(select(func.count()).select_from(Version)) == 1
         assert db.scalar(select(func.count()).select_from(Job)) == 1
-        document = db.get(Document, document_id)
-        version = db.get(Version, result["latest_version_id"])
+        document = require_persisted_row(db, Document, document_id)
+        version = require_persisted_row(db, Version, result["latest_version_id"])
         assert document.latest_version_id == version.id
         assert document.current_version_id is None
         assert version.document_id == document_id and version.version_number == 1
         assert version.status == "queued"
         assert (api.storage / version.storage_key).read_bytes() == payload
         job = db.scalar(select(Job))
+        assert job is not None
         assert job.resource_id == version.id and job.kind == "ingest" and job.status == "queued"
-        record = db.get(Idempotency, f"upload:{document_id}:first-version")
+        record = require_persisted_row(db, Idempotency, f"upload:{document_id}:first-version")
         assert record.result == result
 
 
@@ -568,6 +571,7 @@ def test_cancellation_waiting_for_completion_cannot_overwrite_the_winner(api):
     with ThreadPoolExecutor(max_workers=1) as pool:
         with session() as finalizer, finalizer.begin():
             assistant = finalizer.get(Message, identifier, with_for_update=True)
+            assert assistant is not None
             assistant.status, assistant.content = "complete", "Committed answer"
             finalizer.flush()
             cancel = pool.submit(api.client.post, f"/v1/chats/{chat}/messages/{identifier}/cancel")
@@ -593,7 +597,7 @@ def test_cancellation_waiting_for_completion_cannot_overwrite_the_winner(api):
     assert blocked, "Cancellation never overlapped the uncommitted completion."
     assert response.status_code == 200 and response.json()["status"] == "complete", response.text
     with session() as db:
-        persisted = db.get(Message, identifier)
+        persisted = require_persisted_row(db, Message, identifier)
         assert persisted.status == "complete" and persisted.content == "Committed answer"
 
 
@@ -601,7 +605,7 @@ def test_selection_counts_are_not_limited_to_old_chat_or_comparison_caps(api):
     sources = [ready_source(f"source-{index}.txt", f"Fact number {index}.") for index in range(11)]
     chat = create_chat(api, sources)
     with session() as db:
-        assert len(db.get(Chat, chat).version_ids) == 11
+        assert len(require_persisted_row(db, Chat, chat).version_ids) == 11
     comparison = api.client.post(
         "/v1/comparisons",
         json={"version_ids": [source.version for source in sources[:5]], "dimensions": ["Terms"]},
@@ -613,7 +617,9 @@ def test_llm_client_usage_is_persisted_and_read_by_usage_metrics(api):
     async def record_usage():
         llm = create_llm_client("usage-test-resource")
         try:
-            await llm.record_llm_call_async(
+            record_llm_call = llm.record_llm_call_async
+            assert record_llm_call is not None
+            await record_llm_call(
                 {
                     "model": "test/model",
                     "operation": "generation",
@@ -632,6 +638,7 @@ def test_llm_client_usage_is_persisted_and_read_by_usage_metrics(api):
     asyncio.run(record_usage())  # Exercise accounting without making a provider request.
     with session() as db:
         call = db.scalar(select(LLMCall))
+        assert call is not None
         assert call.resource_id == "usage-test-resource"
         assert call.request_id == "test-request" and call.cached_tokens == 4
     response = api.client.get("/v1/metrics/usage")

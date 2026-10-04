@@ -19,8 +19,10 @@ def enforce_request_rate_limit(operation: str, limit: int, window_seconds: int):
             "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],ARGV[1]) end; return n",
             1,
             key,
-            window_seconds,
+            str(window_seconds),
         )
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise RedisError("The rate counter did not return a positive integer.")
     except RedisError as exc:
         raise AppError(
             503,

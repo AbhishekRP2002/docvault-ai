@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from docvault.cache import calculate_json_fingerprint
 from docvault.llm import prompts
-from docvault.llm.config import LLMSettings
+from docvault.llm.config import LLMSettings, LLMTask
 from docvault.llm.types import ChatGenerationLLMResponse
 
 
@@ -15,6 +15,40 @@ from docvault.llm.types import ChatGenerationLLMResponse
 def clean_model_environment(monkeypatch):
     for name in LLMSettings.model_fields:
         monkeypatch.delenv(name.upper(), raising=False)
+
+
+def test_explicit_dotenv_load_and_environment_precedence(
+    clean_model_environment, monkeypatch, tmp_path
+):
+    """An explicit dotenv supplies defaults while process environment retains precedence."""
+    dotenv = tmp_path / "models.env"
+    dotenv.write_text(
+        "OPENROUTER_SUMMARY_MODEL=test/dotenv-summary\n"
+        "OPENROUTER_REWRITE_MODEL=test/dotenv-rewrite\n"
+    )
+    monkeypatch.setenv("OPENROUTER_SUMMARY_MODEL", "test/environment-summary")
+    settings = LLMSettings(_env_file=dotenv)
+    assert settings.generation_model("summary").model == "test/environment-summary"
+    assert settings.generation_model("rewrite").model == "test/dotenv-rewrite"
+
+
+def test_default_dotenv_is_respected_and_none_disables_it(
+    clean_model_environment, monkeypatch, tmp_path
+):
+    """The constructor sentinel uses model_config; explicit None disables that dotenv."""
+    dotenv = tmp_path / "models.env"
+    dotenv.write_text("OPENROUTER_SUMMARY_MODEL=test/default-dotenv\n")
+    monkeypatch.setitem(LLMSettings.model_config, "env_file", dotenv)
+    assert LLMSettings().generation_model("summary").model == "test/default-dotenv"
+    assert LLMSettings(_env_file=None).generation_model("summary").model == "openai/gpt-4.1-mini"
+
+
+def test_dotenv_values_remain_validated(clean_model_environment, tmp_path):
+    """Constructor forwarding still rejects invalid typed values from a dotenv."""
+    dotenv = tmp_path / "models.env"
+    dotenv.write_text("OPENROUTER_SUMMARY_CONTEXT_TOKENS=not-an-integer\n")
+    with pytest.raises(ValidationError, match="openrouter_summary_context_tokens"):
+        LLMSettings(_env_file=dotenv)
 
 
 @pytest.mark.parametrize(
@@ -62,12 +96,13 @@ def test_environment_overrides_are_independent_for_each_task(clean_model_environ
     for name, value in overrides.items():
         monkeypatch.setenv(name, value)
     settings = LLMSettings(_env_file=None)
-    for task, context, output, temperature in [
+    configurations: list[tuple[LLMTask, int, int, float]] = [
         ("chat", 50000, 2000, 0.1),
         ("rewrite", 10000, 500, 0),
         ("summary", 90000, 3000, 0.2),
         ("comparison", 120000, 4000, 0.3),
-    ]:
+    ]
+    for task, context, output, temperature in configurations:
         assert settings.generation_model(task).model_dump() == {
             "model": f"test/{task}",
             "context_tokens": context,
@@ -103,9 +138,10 @@ def test_each_generation_setting_changes_reuse_identity(clean_model_environment,
 
 def test_prompt_changes_invalidate_only_the_matching_task(clean_model_environment, monkeypatch):
     settings = LLMSettings(_env_file=None)
-    original = {
+    tasks: tuple[LLMTask, ...] = ("chat", "rewrite", "summary", "comparison")
+    original: dict[LLMTask, dict] = {
         task: prompts.build_generation_identity(settings.generation_model(task), task)
-        for task in ("chat", "rewrite", "summary", "comparison")
+        for task in tasks
     }
     monkeypatch.setattr(
         prompts, "CHAT_SYSTEM_PROMPT", prompts.CHAT_SYSTEM_PROMPT + " New instructions."

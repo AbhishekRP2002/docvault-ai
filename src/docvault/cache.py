@@ -29,6 +29,8 @@ def cache_get(key: str):
     """Read a namespaced JSON cache value, returning None on a miss or cache failure."""
     try:
         value = redis_client().get(f"docvault:cache:{key}")
+        if not isinstance(value, (str, bytes, bytearray)):
+            return None
         return json.loads(value) if value else None
     except (RedisError, ValueError):
         return None
@@ -54,7 +56,7 @@ def count_metric(key: str, duration_ms: float = 0):
                 set_={
                     "count": MetricBucket.count + 1,
                     "total_ms": MetricBucket.total_ms + duration_ms,
-                "max_ms": func.greatest(MetricBucket.max_ms, duration_ms),
+                    "max_ms": func.greatest(MetricBucket.max_ms, duration_ms),
                 },
             )
         )

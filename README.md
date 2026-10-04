@@ -68,7 +68,10 @@ Review the generated revision before applying it. Generation runs Ruff lint fixe
 ```sh
 uv run --extra parsing ruff check src tests migrations scripts
 uv run --extra parsing pytest tests/unit -q
+npm exec --yes --package pyright@1.1.414 -- pyright
 ```
+
+Pyright reads the shared configuration in `pyproject.toml` and checks all Python under `src`, `tests`, `migrations`, and `scripts` using `.venv`. The same configuration is available to Pylance; select `.venv/bin/python` in your editor. The npm command runs the standalone checker without adding an application dependency. Narrow optional values before use; use the required-resource helpers for database lookups. Do not suppress optional-value diagnostics. The settings constructor retains the documented dotenv override and validation behavior ([Pydantic settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/#dotenv-env-support)).
 
 Integration checks require a dedicated `docvault_test` database on the local PostgreSQL instance. They create temporary schemas and never reset the application's database:
 

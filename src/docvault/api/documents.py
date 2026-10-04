@@ -4,6 +4,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, File, Header, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from docvault.cache import calculate_json_fingerprint, notify_change
 from docvault.config import get_settings
@@ -103,7 +104,9 @@ async def upload_document_batch(
                             "idempotency_conflict",
                             "This batch key was used for different files.",
                         )
-                    return serialize_upload_batch_response(db, db.get(Batch, record.resource_id))
+                    return serialize_upload_batch_response(
+                        db, require_upload_batch(db, record.resource_id)
+                    )
             items = []
             for index, item in enumerate(prepared):
                 doc = None
@@ -134,10 +137,16 @@ async def upload_document_batch(
                 resolve_storage_path(item["info"]["storage_key"]).unlink(missing_ok=True)
 
 
-def serialize_upload_batch_response(db, batch):
-    """Serialize batch results with live document metadata, rejecting missing batches."""
-    if not batch:
+def require_upload_batch(db: Session, batch_id: str) -> Batch:
+    """Resolve a persisted upload batch or reject a missing or stale batch identifier."""
+    batch = db.get(Batch, batch_id)
+    if batch is None:
         raise AppError(404, "batch_not_found", "Upload batch not found.")
+    return batch
+
+
+def serialize_upload_batch_response(db: Session, batch: Batch) -> dict:
+    """Serialize an existing upload batch with live document metadata."""
     items = []
     for item in batch.items:
         doc = db.get(Document, item["document_id"]) if item["document_id"] else None
@@ -155,7 +164,7 @@ def serialize_upload_batch_response(db, batch):
 def get_upload_batch(batch_id: str):
     """Return the persisted batch results with current document metadata."""
     with session() as db:
-        return serialize_upload_batch_response(db, db.get(Batch, batch_id))
+        return serialize_upload_batch_response(db, require_upload_batch(db, batch_id))
 
 
 @router.get("/documents/{document_id}")
