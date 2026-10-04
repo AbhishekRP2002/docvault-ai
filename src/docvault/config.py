@@ -12,6 +12,7 @@ class Settings(LLMSettings):
     database_url: str = "postgresql+psycopg://docvault:docvault@localhost:15432/docvault"
     redis_url: str = "redis://localhost:16379/0"
     storage_path: Path = Path("data")
+    openrouter_chat_model: str = "openai/gpt-6-luna"
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     max_upload_bytes: int = 25 * 1024 * 1024
     chat_rate_per_minute: int = 20

@@ -45,9 +45,9 @@ Hybrid retrieval takes at most 15 semantic and 15 lexical candidates across the 
 
 Edit [`src/docvault/llm/prompts.py`](src/docvault/llm/prompts.py) for system prompts and summary word targets. [`src/docvault/llm/config.py`](src/docvault/llm/config.py) contains model defaults, context/output reservations, optional temperature and embedding batch capacities. LLM response/evidence models are in [`src/docvault/llm/models.py`](src/docvault/llm/models.py). Document conversion, chunking and the `ParsedChunk`/`ParsedDocument` models belong to [`src/docvault/parsing.py`](src/docvault/parsing.py), beside the ingestion orchestration in `processing.py`.
 
-| Task | Repository default | Environment override |
+| Task | Application default | Environment override |
 |---|---|---|
-| Chat answer and suggestions | `openai/gpt-4.1-mini` | `OPENROUTER_CHAT_MODEL` |
+| Chat answer and suggestions | `openai/gpt-6-luna` | `OPENROUTER_CHAT_MODEL` |
 | Follow-up question rewriting | `openai/gpt-4.1-nano` | `OPENROUTER_INPUT_QUERY_REWRITE_MODEL` |
 | Summary, category, tags and key insights | `openai/gpt-4.1-mini` | `OPENROUTER_SUMMARY_MODEL` |
 | Comparison dimension findings | `openai/gpt-4.1` | `OPENROUTER_COMPARISON_MODEL` |
