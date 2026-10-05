@@ -310,7 +310,10 @@ All `/v1` endpoints serve the same unauthenticated local workspace. Collections 
 | `GET /v1/metrics/usage` | Actual token usage where known, estimated cost, reservations, budget, cache hits. |
 | `GET /v1/metrics/usage/history?days=30` | Implemented read-only UTC daily stored usage with zero-filled dates, explicit unknown/partial cost semantics, period totals, and the twenty most active models; accepts 1–90 days. Budget reservations and expanded accounting remain separate pending work. |
 | `WS /v1/events` | Local processing/insight/comparison and chat lifecycle updates; origin checks and snapshot reconciliation. |
-| `GET /health/live`, `GET /health/ready` | Liveness; bounded DB/Redis/storage checks plus recent worker heartbeat for readiness. |
+| `GET /health/live`, `GET /health/ready` | Dependency-free liveness; readiness requires current schema, valid retrieval indexes, usable storage, Redis, fresh per-worker RQ metadata and a successful dispatcher cycle. |
+| `GET /v1/diagnostics/system` | Best-effort degraded/ready dependency snapshot with safe codes, worker/dispatcher details, SQL/RQ failure counts and configured/unverified provider state; no paid calls. |
+| `GET /v1/versions/{id}/diagnostics`, `GET /v1/jobs/{id}/diagnostics` | Version-specific jobs and bounded per-attempt measured stage timelines, errors, remediation and retry eligibility. |
+| `GET /v1/diagnostics/dead-letters`, `POST /v1/jobs/{id}/retry` | Paginated retained SQL terminal failures and explicitly requested fenced replay through the dispatcher. |
 | `GET /metrics` | Local operational metrics export; avoid document/chat IDs as metric labels. |
 
 Batch transport failures before acceptance fail the request. Once a batch is accepted, each file has its own resource or rejection record; retrying the batch idempotency key returns the same membership without duplicating jobs.
@@ -331,6 +334,8 @@ OpenRouter automatically includes native tokenizer usage in full JSON responses 
 Cost figures are estimates from measured usage and configured rates, not invoices. Track embedding input tokens, generation input/output tokens, cached input tokens, requests, cache hits, retries, and uncertain charges separately. A provider Batch integration is optional future optimization; ordinary embedding batching satisfies the proposed batch-optimization bonus.
 
 ## 11. Observability and operational behavior
+
+Implemented diagnostics are described in [operations.md](operations.md). SQL owns terminal failures and replay; RQ failed deliveries are a separate observation. New attempts persist measured stage runs and safe failure classifications through the generated additive migration `4642d4fae103`; historical missing timings remain unknown. Each worker has native RQ identity/heartbeat state; dispatcher health comes from completed cycles, with clean-shutdown removal and expiry. Database pooling remains per process with configurable connection/pool/query/lock waits, shorter probe limits and fork-safe connection reuse. The UI adds version-specific Processing details with manual refresh; a system-health dashboard is outside this agreed scope.
 
 Structured logs carry request/job/chat/message IDs, stage, attempt, durations, status, error code, model, usage, and pipeline fingerprint. Do not log document content by default. Persist processing attempt history and LLM calls so metrics survive restarts. Emit request latency/error counts, worker heartbeat, oldest queued-job age, parse/embedding/generation timings, cache hits, token/cost totals, and active reservations.
 
@@ -392,7 +397,7 @@ Milestones refer to [implementation-plan.md](implementation-plan.md). Every bonu
 | B15 Document versions | Immutable versions and pinned historical citations | M2, M5 |
 | B16 Batch optimization | Per-file batch jobs, embedding microbatches, bounded concurrency, unchanged-input reuse | M2, M5 |
 | B17 Detailed observability | Correlated structured logs, persistent history, operational metrics | M2, M6 |
-| B18 Health/monitoring | Live/ready, worker heartbeat, document/processing/usage metrics | M1, M6 |
+| B18 Health/monitoring | Live/ready, per-worker and dispatcher health, processing diagnostics, SQL dead letters, document/processing/usage metrics | M1, M6 |
 
 ## 14. Remaining validation and deferred decisions
 

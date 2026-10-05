@@ -10,6 +10,7 @@ Project documents:
 - [Implementation plan and verification gates](docs/implementation-plan.md)
 - [Document processing and RAG research](docs/research.md)
 - [Implemented / verified / pending ledger](docs/progress.md)
+- [Health, processing diagnostics, and recovery](docs/operations.md)
 - [Docling / Chonkie / LlamaIndex chunking comparison](docs/chunking-comparison.md)
 
 ## Reviewer setup
