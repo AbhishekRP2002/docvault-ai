@@ -2,6 +2,7 @@ import { Markdown } from "./markdown";
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ChevronDown,
   Download,
   FileText,
   History,
@@ -32,6 +33,7 @@ import {
 import { ArtifactResult } from "./artifact-result";
 import { EvidenceLinks } from "./evidence-links";
 import { ErrorState, Field, Skeleton, StatusBadge } from "./common";
+import { ProcessingDiagnostics } from "./processing-diagnostics";
 export function DocumentDetail({
   document: doc,
   onClose,
@@ -62,6 +64,9 @@ function Detail({
     doc.current_version_id || doc.latest_version_id,
   );
   const [summaryId, setSummaryId] = useState<string | null>(null);
+  const [diagnosticsVersionId, setDiagnosticsVersionId] = useState<string | null>(
+    null,
+  );
   const [length, setLength] = useState("medium");
   const [tone, setTone] = useState("neutral");
   const [focus, setFocus] = useState("");
@@ -422,7 +427,7 @@ function Detail({
                   {v.error && (
                     <p className="mt-2 text-xs text-destructive">{v.error}</p>
                   )}
-                  <div className="mt-3 flex gap-2 pl-7">
+                  <div className="mt-3 flex flex-wrap gap-2 pl-7">
                     <Button size="sm" variant="ghost" asChild>
                       <a
                         href={apiUrl(`/v1/versions/${v.id}/content`)}
@@ -432,6 +437,22 @@ function Detail({
                         <Download />
                         Download
                       </a>
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-expanded={diagnosticsVersionId === v.id}
+                      aria-controls={`processing-details-${v.id}`}
+                      onClick={() =>
+                        setDiagnosticsVersionId((current) =>
+                          current === v.id ? null : v.id,
+                        )
+                      }
+                    >
+                      <ChevronDown
+                        className={diagnosticsVersionId === v.id ? "rotate-180" : ""}
+                      />
+                      Processing details
                     </Button>
                     {(v.status === "failed" ||
                       v.insight_status === "failed") && (
@@ -448,6 +469,11 @@ function Detail({
                       </Button>
                     )}
                   </div>
+                  {diagnosticsVersionId === v.id && (
+                    <div id={`processing-details-${v.id}`}>
+                      <ProcessingDiagnostics versionId={v.id} />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
