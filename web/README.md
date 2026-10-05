@@ -27,6 +27,8 @@ The [5 October design audit](../docs/design-audit-2026-10-05.md) records the Ext
 
 The source selector loads every page of the document library; it has no hidden document-count cap.
 
+**Files → Comparisons** opens saved comparison history. Close the processing/result modal at any time and reopen the same saved artifact later, including after navigating away or refreshing. History shows original source versions, dimensions, creation time, outcomes and errors; opening it does not start another job. Deleted-source comparisons remain listed as unavailable and cannot expose results. Restart the API to load the new `GET /v1/comparisons` endpoint. Browser close/reopen/navigation acceptance remains manual.
+
 `Dockerfile` produces a static nginx deployment, with same-origin API, WebSocket, and SSE proxying to `api:8000`. Use the repository Compose stack so that hostname resolves.
 
 The application polls during processing and reconnects the update WebSocket after disconnection. Markdown is rendered without raw HTML, and source identifiers become numbered citation buttons. The frontend has no provider credentials or client-side LLM calls.

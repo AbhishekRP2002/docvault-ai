@@ -53,6 +53,12 @@ Files uses a compact table with inline upload/processing states. Transfer state 
 
 Usage displays stored daily LLM requests, input/output tokens, reported costs, and model breakdowns over 7/30/90 days. Day boundaries are UTC; empty dates have zero activity, unknown-only costs are null chart gaps, and partial known costs show unknown-call counts. Processing distribution is separately labeled all-time. These implemented views do not satisfy the remaining quota, reconciliation, or performance acceptance gates.
 
+Files → Comparisons lists persisted comparison artifacts newest first, with pagination, original source-version metadata, dimensions, creation time, status, and errors. It survives closing the result modal, route changes, and refresh. Opening history or a result never submits a new LLM job; active results continue processing independently of the UI. Original version filenames/numbers label historical result columns even after replacement. Unavailable/deleted sources remain identified in history without exposing their filenames or result content; result access retains the existing source validation.
+
+Reviewer startup runs on the host through `./start_up.sh` (or `make up`) using the existing Compose stack. It privately creates a missing `.env`, requires the reviewer to set their key, preserves existing configuration, applies migrations and waits for readiness. Reviewers need Docker/Compose and a supported shell; language runtimes and data services are containerized. Named volumes persist workspace data. No public hosting requirement appears in the supplied assignment; a demo is required.
+
+The Linux local-demo image selects CPU builds of the existing locked Torch/Torchvision releases, with no other package-version change; macOS keeps its existing wheels. CLI-generated locking and actual Linux ARM build/startup checks are recorded in the ledger. GPU configuration and broader platform/runtime acceptance remain separate work.
+
 ## 3. Architecture and dependencies
 
 Use a modular monolith with separate API, worker, and small dispatcher processes from one Python package. LangGraph expresses workflow stages and conditional paths; business behavior remains in small functions with explicit inputs. Introduce interfaces only at the storage, model, queue, and persistence boundaries.
@@ -295,6 +301,7 @@ All `/v1` endpoints serve the same unauthenticated local workspace. Collections 
 | `GET /v1/chats/{id}/messages/{message_id}` | Recover canonical message/status after disconnection. |
 | `GET /v1/versions/{id}/chunks/{chunk_id}` | Cited excerpt and provenance; validate the chunk belongs to the requested live version. |
 | `POST /v1/comparisons` | At least two versions and requested dimensions; no maximum selected-version count. Existing artifact or `202` job, with model-safe split processing when necessary. |
+| `GET /v1/comparisons` | Paginated saved comparison metadata, newest first, with original source versions and errors; `limit` 1–200, default 30, nonnegative `offset`. Result bodies and internal generation configuration are omitted. |
 | `GET /v1/artifacts/{id}` | Summary/comparison result and status; recheck referenced-source deletion. |
 | `GET /v1/metrics/documents` | Logical document/version counts, status counts, formats, bytes, categories. |
 | `GET /v1/metrics/processing` | Attempt/document outcomes, stage duration percentiles, queue age, retry counts, throughput over explicit time window. |

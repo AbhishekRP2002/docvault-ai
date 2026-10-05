@@ -11,6 +11,24 @@ Project documents:
 - [Document processing and RAG research](docs/research.md)
 - [Implemented / verified / pending ledger](docs/progress.md)
 
+## Reviewer setup
+
+The assignment requires a working backend, source repository, documentation, and a demo. It does not explicitly require a publicly hosted URL; PostgreSQL and file storage may be local. This submission uses a local Docker Compose workspace.
+
+Install Docker with Compose (Docker Desktop includes both). From the repository root:
+
+```sh
+./start_up.sh
+```
+
+On the first run, the script creates a private `.env` and stops. Set `OPENROUTER_API_KEY` in that file, then run the same command again. Existing `.env` files are preserved. The sample already sets the task models and capacities; only the key is required initially. Database, Redis, and storage addresses are supplied by Compose inside the containers. The host script builds the images, starts PostgreSQL/Redis/API/worker/dispatcher/frontend, applies migrations, and waits for health checks before showing the URLs. The first build and parser asset download can take several minutes. No host Python, Node, Bun, or PostgreSQL installation is needed.
+
+Open http://127.0.0.1:5173 for the workspace or http://127.0.0.1:8000/docs for interactive API testing. Upload files, wait for Ready, and start a chat. For comparisons, select two or more ready files and choose Compare; saved results are available through **Files → Comparisons**, including runs started before this update. Closing a result does not cancel it.
+
+`make up` calls the same script. `make status`, `make logs`, and `make stop` inspect, follow logs, and stop the stack without deleting its volumes. Without Make, use `docker compose ps --all`, `docker compose logs --follow`, and `docker compose stop`. The script is for POSIX shells on macOS/Linux or Windows through WSL/Git Bash; PowerShell users can copy `.env.example` to `.env`, set the key, then run `docker compose up --build --wait --wait-timeout 300` directly. [Compose's wait option](https://docs.docker.com/reference/cli/docker/compose/up/) waits for services to be running/healthy and leaves them in the background.
+
+Ports 5173, 8000, 15432, and 16379 must be available. If you already run DocVault manually, stop those owned API/frontend processes before switching to the complete Compose stack. The startup script does not kill host processes. Files, database records, Redis data, and parser assets persist in Docker volumes; avoid `docker compose down --volumes` if you want to retain them. Public hosting and IAM remain deferred.
+
 ## Local development
 
 Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY` privately. Never commit the key. Models are configured independently for chat, question rewriting, summaries, comparisons and embeddings; see the task settings below.
@@ -35,7 +53,9 @@ In `web/` run `bun install --frozen-lockfile` and `bun run dev --host 127.0.0.1`
 
 After pulling the LLM naming/HNSW update, stop your API/worker/dispatcher, run `uv run --extra parsing alembic upgrade head`, and restart them. The additive migration preserves existing usage records while renaming `ai_calls` to `llm_calls` and adds the HNSW index. PostgreSQL needs pgvector 0.8+ for filtered iterative scans. New uploads use Docling HybridChunker; existing ready versions retain their stored chunks. No automatic re-embedding or file deletion is performed.
 
-The local runtime was exercised on Python 3.13. The supplied Docker image targets Python 3.12; full `docker compose up --build` reproduction is still pending. Parser model assets download on first use; `uv run --extra parsing python scripts/warm_parser.py /path/to/small-scanned.pdf` can warm them first.
+The local runtime was exercised on Python 3.13. Python 3.12 Linux ARM Docker images now build successfully; a fresh isolated Compose workspace passed startup, migrations, API/frontend readiness, proxy routes, and native Docling TXT chunking. Real-provider generation and PDF/OCR inside Docker, x86 Docker, and Windows remain separate unverified checks. Parser model assets download on first use; `uv run --extra parsing python scripts/warm_parser.py /path/to/small-scanned.pdf` can warm them for local development.
+
+Linux installs the same locked PyTorch releases from their CPU-only index, avoiding 19 CUDA/NVIDIA/Triton packages. macOS wheels and other package versions are unchanged. The existing Torch dependencies are declared explicitly in the parsing extra so uv can select their platform-specific sources; see [uv's PyTorch configuration](https://docs.astral.sh/uv/guides/integration/pytorch/).
 
 To replace a document, open its details and use **Upload new version**. Identical bytes reuse the latest revision; changed bytes are parsed/chunked and reuse vectors for unchanged contextualized input hashes. After indexing completes, new questions automatically use that document's newest ready revision. Pending/failed revisions keep the previous ready source active. Completed/in-flight answers and retries retain their exact historical snapshots; comparisons may explicitly select historical versions. Ordinary uploads are new logical documents, so matching filenames alone do not imply replacement.
 
