@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from redis.asyncio import Redis as AsyncRedis
 from sqlalchemy import text
 
-from docvault.api import chats, documents, metrics
+from docvault.api import chats, diagnostics, documents, metrics
 from docvault.cache import count_metric, redis_client
 from docvault.config import get_settings
 from docvault.db import get_engine
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(documents.router)
 app.include_router(chats.router)
 app.include_router(metrics.router)
+app.include_router(diagnostics.router)
 
 
 @app.exception_handler(AppError)

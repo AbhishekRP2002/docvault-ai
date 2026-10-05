@@ -95,6 +95,8 @@ class Job(Base):
     token: Mapped[int] = mapped_column(default=0)
     dispatches: Mapped[int] = mapped_column(default=0)
     error: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None]
+    error_retryable: Mapped[bool | None]
     next_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -110,6 +112,18 @@ class JobAttempt(Base):
     status: Mapped[str] = mapped_column(default="running")
     stage: Mapped[str] = mapped_column(default="queued")
     error: Mapped[str | None]
+    error_code: Mapped[str | None]
+    error_retryable: Mapped[bool | None]
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class JobStageRun(Base):
+    __tablename__ = "job_stage_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("job_attempts.id"), index=True)
+    stage: Mapped[str]
+    status: Mapped[str] = mapped_column(default="running")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

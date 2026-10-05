@@ -1,5 +1,6 @@
 """Verify migrations and hybrid retrieval in disposable schemas of docvault_test only."""
 
+import ast
 import asyncio
 import hashlib
 import math
@@ -14,6 +15,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, func, insert, inspect, select, text
 from sqlalchemy.engine import make_url
 from support import require_persisted_row
@@ -205,8 +207,10 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
         )
     generated_directory = tmp_path / "migrations"
     shutil.copytree("migrations", generated_directory, ignore=shutil.ignore_patterns("__pycache__"))
-    for candidate in (generated_directory / "versions").glob("d18c6a20b5e9_*.py"):
-        candidate.unlink()
+    for revision in ScriptDirectory.from_config(isolated_database.alembic).iterate_revisions(
+        "heads", PREVIOUS_REVISION
+    ):
+        (generated_directory / "versions" / os.path.basename(revision.path)).unlink()
     generated_config = Config("alembic.ini")
     generated_config.set_main_option("script_location", str(generated_directory))
     command.revision(
@@ -220,7 +224,17 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
     ).read_text()
     assert 'op.rename_table("ai_calls", "llm_calls")' in generated_source
     assert 'op.rename_table("llm_calls", "ai_calls")' in generated_source
-    assert "op.create_table(" not in generated_source and "op.drop_table(" not in generated_source
+    table_operations = [
+        node.args[0].value
+        for node in ast.walk(ast.parse(generated_source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"create_table", "drop_table"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    ]
+    # Diagnostics adds a separate table; neither upgrade nor downgrade may recreate the ledger.
+    assert table_operations == ["job_stage_runs", "job_stage_runs"]
     assert 'postgresql_with={"m": 32, "ef_construction": 200}' in generated_source
     command.upgrade(generated_config, "head")
     with isolated_database.engine.connect() as connection:

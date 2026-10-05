@@ -17,15 +17,17 @@ from docvault.cache import (
 from docvault.config import get_settings
 from docvault.db import session
 from docvault.documents import require_document, require_version
+from docvault.errors import AppError
 from docvault.integrations import create_llm_client
 from docvault.jobs import SourceDeleted, job_checkpoint
 from docvault.llm.insights import generate_document_comparison, generate_document_summary
 from docvault.llm.models import Evidence
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import token_count
-from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, Version, now
+from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, JobStageRun, Version, now
 from docvault.parsing import CHUNK_TOKENS, ParsedDocument, parse_document_file
 from docvault.retrieval import create_cited_evidence_record
+from docvault.stage_tracking import processing_stage
 from docvault.storage import resolve_storage_path
 
 
@@ -415,7 +417,11 @@ async def _generate_requested_artifact(job_id: str, token: int, artifact_id: str
             None,
             calculate_json_fingerprint(generation_identity),
         ):
-            raise ValueError("LLM configuration changed after submission; request a new artifact.")
+            raise AppError(
+                409,
+                "generation_configuration_changed",
+                "LLM configuration changed after submission; request a new artifact.",
+            )
         if kind == "summary":
             if len(evidence) != 1:
                 raise ValueError("A summary artifact requires exactly one document version.")
@@ -483,13 +489,27 @@ def _cleanup_deleted_document(job_id: str, token: int, document_id: str) -> None
         )
         if cancelled_ids:
             db.execute(
+                update(JobStageRun)
+                .where(
+                    JobStageRun.attempt_id.in_(
+                        select(JobAttempt.id).where(JobAttempt.job_id.in_(cancelled_ids))
+                    ),
+                    JobStageRun.status == "running",
+                )
+                .values(status="cancelled", finished_at=now())
+            )
+            db.execute(
                 update(JobAttempt)
                 .where(
                     JobAttempt.job_id.in_(cancelled_ids),
                     JobAttempt.status == "running",
                 )
                 .values(
-                    status="cancelled", error="A source document was deleted.", finished_at=now()
+                    status="cancelled",
+                    error="A source document was deleted.",
+                    error_code="source_deleted",
+                    error_retryable=False,
+                    finished_at=now(),
                 )
             )
             db.execute(
@@ -525,14 +545,20 @@ async def process_document_job(job_id: str, token: int) -> None:
         if version.status != "ready":
             _update_processing_stage(job_id, token, "parsing")
             parsed, fingerprint = _load_or_parse_document(version)
-            _persist_document_chunks(job_id, token, parsed, fingerprint)
-            await _embed_missing_chunks(job_id, token, version.id)
-        _activate_ready_version(job_id, token)
+            with processing_stage("persisting"):
+                _persist_document_chunks(job_id, token, parsed, fingerprint)
+            with processing_stage("embedding"):
+                await _embed_missing_chunks(job_id, token, version.id)
+        with processing_stage("activation"):
+            _activate_ready_version(job_id, token)
     elif kind == "insights":
-        await _create_document_insights(job_id, token, resource_id)
+        with processing_stage("generating"):
+            await _create_document_insights(job_id, token, resource_id)
     elif kind in {"summary", "comparison"}:
-        await _generate_requested_artifact(job_id, token, resource_id)
+        with processing_stage("generating"):
+            await _generate_requested_artifact(job_id, token, resource_id)
     elif kind == "cleanup":
-        _cleanup_deleted_document(job_id, token, resource_id)
+        with processing_stage("cleanup"):
+            _cleanup_deleted_document(job_id, token, resource_id)
     else:
         raise ValueError("Unsupported job kind.")

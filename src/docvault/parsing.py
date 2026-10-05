@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict
 
 from docvault.config import get_settings
 from docvault.llm.provider import ContextLimitError, token_count
+from docvault.stage_tracking import processing_stage
 
 CHUNK_TOKENS = 750
 
@@ -438,7 +439,10 @@ def parse_document_file(path: Path, mime_type: str, filename: str) -> ParsedDocu
     """
     if mime_type == "text/plain":
         try:
-            return parse_text_document(path.read_text(encoding="utf-8-sig"), filename)
+            with processing_stage("conversion"):
+                source = path.read_text(encoding="utf-8-sig")
+            with processing_stage("chunking"):
+                return parse_text_document(source, filename)
         except UnicodeDecodeError as exc:
             raise ValueError("TXT files must use UTF-8 encoding.") from exc
     supported = {
@@ -447,8 +451,12 @@ def parse_document_file(path: Path, mime_type: str, filename: str) -> ParsedDocu
     }
     if mime_type not in supported:
         raise ValueError("Only PDF, DOCX, and UTF-8 TXT documents are supported.")
-    result = _get_document_converter().convert(path, raises_on_error=True)
-    status = str(getattr(result.status, "value", result.status))
-    if status != "success":
-        raise ValueError("Document conversion was incomplete; the file was not indexed.")
-    return chunk_docling_document(result.document, filename, is_pdf=mime_type == "application/pdf")
+    with processing_stage("conversion"):
+        result = _get_document_converter().convert(path, raises_on_error=True)
+        status = str(getattr(result.status, "value", result.status))
+        if status != "success":
+            raise ValueError("Document conversion was incomplete; the file was not indexed.")
+    with processing_stage("chunking"):
+        return chunk_docling_document(
+            result.document, filename, is_pdf=mime_type == "application/pdf"
+        )

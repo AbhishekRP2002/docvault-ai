@@ -18,9 +18,10 @@ from sqlalchemy.orm import Session
 from docvault.cache import notify_change, redis_client
 from docvault.config import get_settings
 from docvault.db import session
+from docvault.diagnostics import classify_processing_failure, finish_attempt_stages
 from docvault.errors import AppError
-from docvault.llm.provider import ProviderError
 from docvault.models import Artifact, Document, Job, JobAttempt, Message, Version, now
+from docvault.stage_tracking import collect_processing_stages
 
 log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
@@ -46,7 +47,10 @@ def _resolve_job_document_ids(db: Session, job: Job) -> list[str]:
     artifact = db.get(Artifact, job.resource_id)
     if not artifact:
         raise SourceDeleted("The artifact no longer exists.")
-    return list(db.scalars(select(Version.document_id).where(Version.id.in_(artifact.version_ids))))
+    ids = list(db.scalars(select(Version.document_id).where(Version.id.in_(artifact.version_ids))))
+    if not artifact.version_ids or len(ids) != len(set(artifact.version_ids)):
+        raise SourceDeleted("A source version no longer exists.")
+    return ids
 
 
 def job_checkpoint(db: Session, job_id: str, token: int, stage: str | None = None) -> Job:
@@ -123,7 +127,11 @@ def _finish_job_attempt(db: Session, job: Job, status: str, error: str | None = 
     )
     if attempt:
         attempt.status, attempt.error, attempt.finished_at = status, error, now()
+        attempt.error_code, attempt.error_retryable = job.error_code, job.error_retryable
         attempt.stage = job.stage
+        finish_attempt_stages(
+            db, attempt.id, "interrupted" if job.error_code == "lease_expired" else status, now()
+        )
 
 
 def _claim_pending_job(job_id: str) -> int | None:
@@ -137,6 +145,8 @@ def _claim_pending_job(job_id: str) -> int | None:
             return None
         if job.attempts >= MAX_ATTEMPTS:
             job.status, job.error = "failed", "The maximum number of job attempts was reached."
+            job.error_code, job.error_retryable = "attempts_exhausted", False
+            job.finished_at, job.lease_until = now(), None
             _update_job_resource_state(db, job, "failed", job.error)
             return None
         job.status = "running"
@@ -145,6 +155,7 @@ def _claim_pending_job(job_id: str) -> int | None:
         job.started_at = now()
         job.finished_at = None
         job.error = None
+        job.error_code, job.error_retryable = None, None
         job.lease_until = now() + timedelta(seconds=get_settings().lease_seconds)
         db.add(JobAttempt(job_id=job.id, attempt=job.attempts, stage=job.stage))
         return job.token
@@ -180,19 +191,13 @@ def _handle_job_failure(job_id: str, token: int, exc: Exception) -> None:
     if isinstance(exc, LostClaim):
         return
     cancelled = isinstance(exc, SourceDeleted)
-    retryable = isinstance(exc, (OperationalError, RedisError, TimeoutError, ConnectionError)) or (
-        isinstance(exc, (ProviderError, AppError)) and exc.retryable
-    )
-    if cancelled:
-        message = "A source document was deleted."
-    elif isinstance(exc, (ProviderError, AppError, ValueError)):
-        message = str(exc)[:1000]
-    else:
-        message = "Processing failed. Check the parser configuration or retry the job."
     with session() as db, db.begin():
         job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
         if not job or job.token != token or job.status != "running":
             return
+        error = classify_processing_failure(exc, job.stage)
+        message, retryable = error.message, error.retryable
+        job.error_code, job.error_retryable = error.code, retryable
         _finish_job_attempt(db, job, "cancelled" if cancelled else "failed", message)
         retry = retryable and job.attempts < MAX_ATTEMPTS
         job.status = "cancelled" if cancelled else "queued" if retry else "failed"
@@ -215,9 +220,11 @@ def run_job(job_id: str) -> None:
     heartbeat.start()
     notify_change()
     try:
+        from docvault.diagnostics import record_job_stage
         from docvault.processing import process_document_job
 
-        asyncio.run(process_document_job(job_id, token))
+        with collect_processing_stages(lambda stage: record_job_stage(job_id, token, stage)):
+            asyncio.run(process_document_job(job_id, token))
         with session() as db, db.begin():
             job = job_checkpoint(db, job_id, token)
             job.status, job.stage, job.finished_at, job.lease_until = (
@@ -235,7 +242,7 @@ def run_job(job_id: str) -> None:
         notify_change()
 
 
-def dispatch_pending_jobs() -> int:
+def dispatch_pending_jobs(*, raise_publish_errors: bool = False) -> int:
     """Recover expired claims, commit dispatch leases, then publish queue deliveries."""
     timestamp = now()
     with session() as db, db.begin():
@@ -270,6 +277,7 @@ def dispatch_pending_jobs() -> int:
         )
         for job in abandoned:
             job.token += 1  # Fence a stalled runner before making the job eligible again.
+            job.error_code, job.error_retryable = "lease_expired", True
             _finish_job_attempt(db, job, "failed", "The previous worker lease expired.")
             exhausted = job.attempts >= MAX_ATTEMPTS
             job.status = "failed" if exhausted else "queued"
@@ -298,6 +306,7 @@ def dispatch_pending_jobs() -> int:
             deliveries.append((job.id, job.attempts + 1, job.dispatches))
     queue = Queue("docvault", connection=redis_client())
     count = 0
+    publication_failed = False
     for job_id, attempt, dispatch in deliveries:
         try:
             queue.enqueue(
@@ -310,6 +319,7 @@ def dispatch_pending_jobs() -> int:
             )
             count += 1
         except RedisError:
+            publication_failed = True
             with session() as db, db.begin():
                 db.execute(
                     update(Job)
@@ -322,24 +332,43 @@ def dispatch_pending_jobs() -> int:
                 )
     if deliveries or abandoned or recovered_message_id is not None:
         notify_change()
+    if publication_failed and raise_publish_errors:
+        raise RedisError("One or more durable job deliveries could not be published.")
     return count
 
 
 def retry_job(job_id: str) -> None:
     """Requeue a failed job after checking its sources, resetting attempts and fencing old runners."""
     with session() as db, db.begin():
-        job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
-        if not job:
+        candidate = db.get(Job, job_id)
+        if candidate is None:
+            raise AppError(404, "job_not_found", "Job not found.")
+        ids = _resolve_job_document_ids(db, candidate)
+        documents = list(
+            db.scalars(
+                select(Document).where(Document.id.in_(ids)).order_by(Document.id).with_for_update()
+            )
+        )
+        job = db.scalar(
+            select(Job)
+            .where(Job.id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if job is None:
             raise AppError(404, "job_not_found", "Job not found.")
         if job.status != "failed":
             raise AppError(409, "job_not_failed", "Only a failed job can be retried.")
-        documents = list(
-            db.scalars(select(Document).where(Document.id.in_(_resolve_job_document_ids(db, job))))
-        )
-        if job.kind != "cleanup" and any(doc.deleted_at for doc in documents):
+        if _resolve_job_document_ids(db, job) != ids:
+            raise AppError(409, "job_sources_changed", "The job sources changed; try again.")
+        if len(documents) != len(set(ids)) or (
+            job.kind != "cleanup" and any(doc.deleted_at for doc in documents)
+        ):
             raise AppError(404, "document_not_found", "The source document was deleted.")
         job.status, job.stage, job.error = "queued", "queued", None
+        job.error_code, job.error_retryable = None, None
         job.attempts, job.token = 0, job.token + 1
+        job.started_at = None
         job.next_at, job.lease_until, job.finished_at = now(), None, None
         _update_job_resource_state(db, job, "queued")
     notify_change()
