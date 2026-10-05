@@ -30,9 +30,10 @@ from docling_core.types.doc.items.text import SectionHeaderItem, TitleItem
 from docling_core.types.doc.labels import DocItemLabel
 from pydantic import BaseModel, ConfigDict
 
+from docvault.config import get_settings
 from docvault.llm.provider import ContextLimitError, token_count
 
-CHUNK_TOKENS = 600
+CHUNK_TOKENS = 750
 
 
 class ParsedChunk(BaseModel):
@@ -240,7 +241,9 @@ def _create_validated_chunk(text: str, embedding_text: str, location: dict) -> P
     """Enforce the complete embedding-input capacity without truncating source text."""
     size = token_count(embedding_text)
     if size > CHUNK_TOKENS:
-        raise ContextLimitError("A document chunk exceeds the 600-token context capacity.")
+        raise ContextLimitError(
+            f"A document chunk exceeds the {CHUNK_TOKENS}-token context capacity."
+        )
     return ParsedChunk(
         text=text, embedding_text=embedding_text, location=location, token_count=size
     )
@@ -362,18 +365,34 @@ def _get_document_converter():
     RapidOCR uses the torch backend. Missing conversion dependencies raise RuntimeError.
     """
     try:
+        from docling.datamodel.accelerator_options import AcceleratorOptions
+        from docling.datamodel.backend_options import ThreadedDoclingParseBackendOptions
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
     except ImportError as exc:
         raise RuntimeError("Install the parsing extra to process PDF and DOCX files.") from exc
-    options = PdfPipelineOptions()
+    settings = get_settings()
+    options = PdfPipelineOptions(
+        accelerator_options=AcceleratorOptions(num_threads=settings.docling_num_threads),
+        layout_batch_size=settings.docling_layout_batch_size,
+        ocr_batch_size=settings.docling_ocr_batch_size,
+        table_batch_size=settings.docling_table_batch_size,
+    )
     options.do_ocr = True
     options.do_table_structure = True
     options.ocr_options = RapidOcrOptions(lang=["english"], backend="torch")
+    backend_options = ThreadedDoclingParseBackendOptions.model_validate(
+        {"parser_threads": settings.docling_parser_threads or settings.docling_num_threads}
+    )
     return DocumentConverter(
         allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)},
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=options,
+                backend_options=backend_options,
+            )
+        },
     )
 
 

@@ -59,7 +59,7 @@ def test_txt_native_merges_keep_exact_whitespace_and_literal_special_tokens():
         start, end = chunk.location["char_start"], chunk.location["char_end"]
         assert source[start:end] == chunk.text
         assert chunk.location["line_start"] == source[:start].count("\n") + 1
-        assert chunk.token_count == token_count(chunk.embedding_text) <= 600
+        assert chunk.token_count == token_count(chunk.embedding_text) <= 750
         assert "terms.txt" in chunk.embedding_text
     assert any(chunk.location["headings"] == ["Terms", "Renewal"] for chunk in parsed.chunks)
     assert parsed.chunks[-1].location["headings"] == ["End"]
@@ -69,7 +69,7 @@ def test_txt_large_whitespace_gap_is_preserved_without_exceeding_context():
     source = "First.\n" + " \t\n" * 2000 + "Last."
     parsed = parse_text_document(source, "spaced.txt")
     assert "".join(chunk.text for chunk in parsed.chunks) == source
-    assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)
     assert parsed.chunks[-1].location["char_end"] == len(source)
 
 
@@ -128,13 +128,13 @@ def test_empty_sections_remain_evidence_and_oversized_context_fails_visibly():
     document.add_heading("Second section")
     parsed = chunk_docling_document(document, "headings.docx", is_pdf=False)
     assert [chunk.text for chunk in parsed.chunks] == ["First section", "Second section"]
-    assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)
     document.add_heading("Very long heading " * 400)
     document.add_text(label=DocItemLabel.TEXT, text="Content must not be silently truncated.")
     with pytest.raises(ContextLimitError, match="headings"):
         chunk_docling_document(document, "headings.docx", is_pdf=False)
     with pytest.raises(ContextLimitError, match="filename"):
-        parse_text_document("Content.", "filename " * 700)
+        parse_text_document("Content.", "filename " * 900)
 
 
 def test_table_segments_reserve_large_filename_and_heading_context():
@@ -142,7 +142,7 @@ def test_table_segments_reserve_large_filename_and_heading_context():
     document.add_heading("Quarterly pricing terms " * 100)
     table(
         document,
-        [["Product", "Price"], *[[f"SKU-{index}", f"{index} USD"] for index in range(200)]],
+        [["Product", "Price"], *[[f"SKU-{index}", f"{index} USD"] for index in range(300)]],
     )
     parsed = chunk_docling_document(document, "contract_" * 25 + ".pdf", is_pdf=True)
     chunks = [chunk for chunk in parsed.chunks if "SKU-" in chunk.text]
@@ -150,10 +150,10 @@ def test_table_segments_reserve_large_filename_and_heading_context():
     headers = chunks[0].text.splitlines()[:2]
     assert all(chunk.text.splitlines()[:2] == headers for chunk in chunks)
     assert all(
-        chunk.token_count == token_count(chunk.embedding_text) <= 600 for chunk in parsed.chunks
+        chunk.token_count == token_count(chunk.embedding_text) <= 750 for chunk in parsed.chunks
     )
     joined = "\n".join(chunk.text for chunk in chunks)
-    assert re.findall(r"\|\s*SKU-(\d+)\s*\|", joined) == [str(index) for index in range(200)]
+    assert re.findall(r"\|\s*SKU-(\d+)\s*\|", joined) == [str(index) for index in range(300)]
 
 
 def test_oversized_table_header_does_not_disappear_from_later_chunks():
@@ -174,7 +174,34 @@ def test_oversized_table_row_keeps_every_value_and_repeats_headers():
     assert len(parsed.chunks) > 1
     headers = parsed.chunks[0].text.splitlines()[:2]
     assert all(chunk.text.splitlines()[:2] == headers for chunk in parsed.chunks)
-    assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)
     assert all(chunk.location["label"] == "table" for chunk in parsed.chunks)
     values = re.findall(r"term\d+", "\n".join(chunk.text for chunk in parsed.chunks))
     assert values == [f"term{index}" for index in range(1500)]
+
+
+@pytest.mark.parametrize("separator", [". ", "? ", "! ", ".\r\n"])
+def test_native_prose_splits_prefer_sentence_terminators(separator):
+    """Preserve complete short sentences under the native splitter's supported delimiters."""
+    sentence = "Customers must provide written notice before the annual renewal date" + separator
+    source = sentence * 300
+    parsed = parse_text_document(source, "policy.txt")
+    assert len(parsed.chunks) > 1
+    assert "".join(chunk.text for chunk in parsed.chunks) == source
+    assert all(chunk.text.rstrip().endswith(separator.strip()) for chunk in parsed.chunks)
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)
+
+
+def test_750_token_budget_is_used_instead_of_the_old_600_token_budget():
+    """The approved larger budget applies to full embedding inputs, including context."""
+    parsed = parse_text_document("Complete sentence. " * 800, "budget.txt")
+    assert any(600 < chunk.token_count <= 750 for chunk in parsed.chunks)
+
+
+def test_native_splitter_preserves_an_oversized_sentence():
+    """A sentence exceeding capacity may split, but every source character stays available."""
+    source = " ".join(f"term{index}" for index in range(2000)) + "."
+    parsed = parse_text_document(source, "long-sentence.txt")
+    assert len(parsed.chunks) > 1
+    assert "".join(chunk.text for chunk in parsed.chunks) == source
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)

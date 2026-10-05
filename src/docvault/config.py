@@ -1,13 +1,20 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
+from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from pydantic_settings.sources import ENV_FILE_SENTINEL, DotenvType
 
 from docvault.llm.config import LLMSettings
 
 
 class Settings(LLMSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    def __init__(self, *, _env_file: DotenvType | None = ENV_FILE_SENTINEL, **values: Any) -> None:
+        """Expose the dotenv override to type checkers while preserving settings validation."""
+        super().__init__(_env_file=_env_file, **values)
 
     database_url: str = "postgresql+psycopg://docvault:docvault@localhost:15432/docvault"
     redis_url: str = "redis://localhost:16379/0"
@@ -21,6 +28,11 @@ class Settings(LLMSettings):
     job_timeout_seconds: int = 1800
     lease_seconds: int = 120
     generation_timeout_seconds: int = 600
+    docling_num_threads: int = Field(default=4, gt=0)
+    docling_parser_threads: int | None = Field(default=None, gt=0)
+    docling_layout_batch_size: int = Field(default=4, gt=0)
+    docling_ocr_batch_size: int = Field(default=4, gt=0)
+    docling_table_batch_size: int = Field(default=4, gt=0)
 
 
 @lru_cache

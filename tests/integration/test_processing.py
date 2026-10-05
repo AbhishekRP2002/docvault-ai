@@ -6,6 +6,7 @@ application data is reset. Model calls are deterministic; PostgreSQL is real.
 
 import asyncio
 import hashlib
+import importlib.metadata
 import os
 import threading
 import time
@@ -255,7 +256,14 @@ def test_retry_reuses_completed_embedding_batches(isolated_db, monkeypatch):
     assert [len(batch) for batch in llm.batches] == [64, 6, 6]
 
 
-def test_chunker_upgrade_reparses_old_cached_artifacts(isolated_db, monkeypatch):
+@pytest.mark.parametrize(
+    "cached_chunker",
+    [
+        "structure-600-v1",
+        f"docling-hybrid-600-v2-core-{importlib.metadata.version('docling-core')}",
+    ],
+)
+def test_chunker_upgrade_reparses_old_cached_artifacts(isolated_db, monkeypatch, cached_chunker):
     monkeypatch.setattr(processing, "create_llm_client", lambda resource: FakeLLM())
     _, version_id, job_id = seed_version()
     with database.session() as db:
@@ -265,7 +273,7 @@ def test_chunker_upgrade_reparses_old_cached_artifacts(isolated_db, monkeypatch)
                 "sha256": version.sha256,
                 "filename": version.filename,
                 "parser": "utf8-v1",
-                "chunker": "structure-600-v1",
+                "chunker": cached_chunker,
                 "ocr": "rapidocr-english-torch",
             }
         )

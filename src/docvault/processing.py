@@ -24,7 +24,7 @@ from docvault.llm.models import Evidence
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import token_count
 from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, Version, now
-from docvault.parsing import ParsedDocument, parse_document_file
+from docvault.parsing import CHUNK_TOKENS, ParsedDocument, parse_document_file
 from docvault.retrieval import create_cited_evidence_record
 from docvault.storage import resolve_storage_path
 
@@ -44,7 +44,9 @@ def calculate_parser_fingerprint(version: Version) -> str:
             "sha256": version.sha256,
             "filename": version.filename,
             "parser": parser,
-            "chunker": f"docling-hybrid-600-v2-core-{importlib.metadata.version('docling-core')}",
+            "chunker": (
+                f"docling-hybrid-{CHUNK_TOKENS}-v3-core-{importlib.metadata.version('docling-core')}"
+            ),
             "ocr": "rapidocr-english-torch",
         }
     )

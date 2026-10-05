@@ -68,7 +68,7 @@ def test_long_unicode_text_keeps_every_character_without_token_cap():
     parsed = parse_text_document(text, "terms.txt")
     assert parsed.text == text
     assert "".join(chunk.text for chunk in parsed.chunks) == text
-    assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)
     for chunk in parsed.chunks:
         assert text[chunk.location["char_start"] : chunk.location["char_end"]] == chunk.text
 
@@ -125,7 +125,7 @@ def test_tables_repeat_headers_and_preserve_all_rows():
     headers = table_chunks[0].text.splitlines()[:2]
     assert "item" in headers[0] and "price" in headers[0]
     assert all(chunk.text.splitlines()[:2] == headers for chunk in table_chunks)
-    assert all(chunk.token_count <= 600 for chunk in parsed.chunks)
+    assert all(chunk.token_count <= 750 for chunk in parsed.chunks)
     actual_rows = re.findall(
         r"\|\s*Product (\d+)\s*\|\s*(\d+) USD\s*\|", "\n".join(chunk.text for chunk in table_chunks)
     )
