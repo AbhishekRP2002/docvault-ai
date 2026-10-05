@@ -1,4 +1,3 @@
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -106,19 +105,15 @@ def test_disabled_rate_limit_never_contacts_redis(monkeypatch):
     assert client.eval_arguments == ()
 
 
-@pytest.mark.parametrize(
-    ("heartbeat", "expected_status"),
-    [(b"950", 200), ("950", 200), (b"800", 503), (None, 503), (object(), 503), (b"bad", 503)],
-)
-def test_readiness_handles_missing_stale_and_invalid_heartbeats(
-    monkeypatch, tmp_path, heartbeat, expected_status
-):
-    """Require a fresh serialized worker heartbeat while tolerating invalid Redis values."""
-    client = RedisResponseFixture(heartbeat)
-    connection = SimpleNamespace(execute=lambda statement: None)
-    engine = SimpleNamespace(connect=lambda: nullcontext(connection))
-    monkeypatch.setattr(main, "get_engine", lambda: engine)
-    monkeypatch.setattr(main, "redis_client", lambda: client)
-    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(storage_path=tmp_path))
-    monkeypatch.setattr(main.time, "time", lambda: 1_000)
-    assert main.check_readiness().status_code == expected_status
+@pytest.mark.parametrize("ready", [True, False])
+def test_readiness_returns_dependency_status_code(monkeypatch, ready):
+    """Preserve the ready/degraded HTTP contract while exposing independent check results."""
+    snapshot = SimpleNamespace(
+        status="ready" if ready else "degraded",
+        model_dump=lambda **kwargs: {
+            "status": "ready" if ready else "degraded",
+            "checks": {"worker": ready},
+        },
+    )
+    monkeypatch.setattr(main, "read_system_diagnostics", lambda: snapshot)
+    assert main.check_readiness().status_code == (200 if ready else 503)

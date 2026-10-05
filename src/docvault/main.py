@@ -12,13 +12,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from redis.asyncio import Redis as AsyncRedis
-from sqlalchemy import text
 
 from docvault.api import chats, diagnostics, documents, metrics
-from docvault.cache import count_metric, redis_client
+from docvault.cache import count_metric
 from docvault.config import get_settings
-from docvault.db import get_engine
 from docvault.errors import AppError
+from docvault.health import SystemDiagnostics, read_system_diagnostics
 
 logger = logging.getLogger("docvault")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -147,29 +146,17 @@ def check_liveness():
 
 @app.get("/health/ready", tags=["health"])
 def check_readiness():
-    """Check the migration table, Redis, worker heartbeat, and storage; return 503 if degraded."""
-    checks = {}
-    try:
-        with get_engine().connect() as connection:
-            connection.execute(text("SELECT 1 FROM alembic_version"))
-        checks["database"] = True
-    except Exception:
-        checks["database"] = False
-    try:
-        checks["redis"] = bool(redis_client().ping())
-        heartbeat = redis_client().get("docvault:worker:heartbeat")
-        checks["worker"] = (
-            isinstance(heartbeat, (str, bytes, bytearray))
-            and bool(heartbeat)
-            and time.time() - float(heartbeat) < 120
-        )
-    except Exception:
-        checks["redis"], checks["worker"] = False, False
-    checks["storage"] = get_settings().storage_path.is_dir()
-    ok = all(checks.values())
+    """Require usable storage, current schema/indexes, Redis and healthy consumers/dispatcher."""
+    snapshot = read_system_diagnostics()
     return JSONResponse(
-        {"status": "ready" if ok else "degraded", "checks": checks}, status_code=200 if ok else 503
+        snapshot.model_dump(mode="json"), status_code=200 if snapshot.status == "ready" else 503
     )
+
+
+@app.get("/v1/diagnostics/system", response_model=SystemDiagnostics, tags=["diagnostics"])
+def get_system_diagnostics() -> SystemDiagnostics:
+    """Return a safe dependency snapshot even when the system is degraded."""
+    return read_system_diagnostics()
 
 
 @app.get("/metrics", response_class=PlainTextResponse, tags=["metrics"])

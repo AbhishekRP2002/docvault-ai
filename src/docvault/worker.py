@@ -1,37 +1,36 @@
-"""Run one queue consumer: python -m docvault.worker."""
+"""Run one native RQ queue consumer: python -m docvault.worker."""
 
+import os
+import socket
 import sys
-import threading
-import time
+from uuid import uuid4
 
-from redis.exceptions import RedisError
 from rq import Worker
 from rq.worker import SpawnWorker
 
 from docvault.cache import redis_client
-
-
-def _publish_worker_heartbeat(stop: threading.Event) -> None:
-    """Refresh the worker's expiring Redis heartbeat until stopped, tolerating Redis outages."""
-    while not stop.is_set():
-        try:
-            redis_client().setex("docvault:worker:heartbeat", 30, str(time.time()))
-        except RedisError:
-            pass
-        stop.wait(10)
+from docvault.config import get_settings
+from docvault.health import remove_process_identity, save_process_identity
 
 
 def main() -> None:
-    """Run the document queue consumer with a background heartbeat and graceful thread cleanup."""
+    """Run one consumer with native RQ heartbeats; no independent liveness ticker."""
     worker_type = SpawnWorker if sys.platform == "darwin" else Worker
-    stop = threading.Event()
-    heartbeat = threading.Thread(target=_publish_worker_heartbeat, args=(stop,), daemon=True)
-    heartbeat.start()
+    identifier = f"docvault-{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
+    # RQ's dequeue wait is worker_ttl minus 15 seconds; idle heartbeats must stay fresh.
+    freshness_window = get_settings().health_heartbeat_max_age_seconds
+    worker = worker_type(
+        ["docvault"],
+        name=identifier,
+        connection=redis_client(),
+        worker_ttl=min(90, freshness_window),
+        job_monitoring_interval=min(30, freshness_window // 3),
+    )
+    save_process_identity("worker", identifier)
     try:
-        worker_type(["docvault"], connection=redis_client()).work()
+        worker.work()
     finally:
-        stop.set()
-        heartbeat.join(timeout=5)
+        remove_process_identity("worker", identifier)
 
 
 if __name__ == "__main__":

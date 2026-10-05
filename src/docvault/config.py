@@ -17,6 +17,16 @@ class Settings(LLMSettings):
         super().__init__(_env_file=_env_file, **values)
 
     database_url: str = "postgresql+psycopg://docvault:docvault@localhost:15432/docvault"
+    database_connect_timeout_seconds: int = Field(default=3, ge=1)
+    database_pool_timeout_seconds: int = Field(default=5, ge=1)
+    database_statement_timeout_ms: int = Field(default=30000, ge=1)
+    database_lock_timeout_ms: int = Field(default=5000, ge=1)
+    database_pool_size: int = Field(default=10, ge=1)
+    database_max_overflow: int = Field(default=5, ge=0)
+    health_database_connect_timeout_seconds: int = Field(default=2, ge=1)
+    health_database_statement_timeout_ms: int = Field(default=1000, ge=1)
+    health_heartbeat_max_age_seconds: int = Field(default=120, ge=30)
+    storage_min_free_bytes: int = Field(default=0, ge=0)
     redis_url: str = "redis://localhost:16379/0"
     storage_path: Path = Path("data")
     openrouter_chat_model: str = "openai/gpt-6-luna"
