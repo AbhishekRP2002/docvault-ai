@@ -10,6 +10,7 @@ Project documents:
 - [Implementation plan and verification gates](docs/implementation-plan.md)
 - [Document processing and RAG research](docs/research.md)
 - [Implemented / verified / pending ledger](docs/progress.md)
+- [Docling / Chonkie / LlamaIndex chunking comparison](docs/chunking-comparison.md)
 
 ## Reviewer setup
 
@@ -28,6 +29,12 @@ Open http://127.0.0.1:5173 for the workspace or http://127.0.0.1:8000/docs for i
 `make up` calls the same script. `make status`, `make logs`, and `make stop` inspect, follow logs, and stop the stack without deleting its volumes. Without Make, use `docker compose ps --all`, `docker compose logs --follow`, and `docker compose stop`. The script is for POSIX shells on macOS/Linux or Windows through WSL/Git Bash; PowerShell users can copy `.env.example` to `.env`, set the key, then run `docker compose up --build --wait --wait-timeout 300` directly. [Compose's wait option](https://docs.docker.com/reference/cli/docker/compose/up/) waits for services to be running/healthy and leaves them in the background.
 
 Ports 5173, 8000, 15432, and 16379 must be available. If you already run DocVault manually, stop those owned API/frontend processes before switching to the complete Compose stack. The startup script does not kill host processes. Files, database records, Redis data, and parser assets persist in Docker volumes; avoid `docker compose down --volumes` if you want to retain them. Public hosting and IAM remain deferred.
+
+## Parser tuning
+
+Parser tuning is available in `.env.example`: `DOCLING_NUM_THREADS`, optional `DOCLING_PARSER_THREADS`, and per-stage `DOCLING_*_BATCH_SIZE`. Defaults retain four threads/batches; larger CPU settings were slower in the measured sample. Restart your worker after edits. Each active ingestion process has its own thread/model budget, so account for other workers on the same machine. A page batch is not a worker count. Existing ready documents retain their stored chunks; fresh ingestion uses the 750-token contextualized chunk limit.
+
+To measure your own PDF without indexing or LLM calls, run `uv run --extra parsing python scripts/benchmark_parser.py /path/to/document.pdf --threads 4 --layout-batch-size 4 --device cpu --runs 2`, then compare another configuration. The command prints initialization/conversion/chunking time, page/chunk counts, and a text digest; it does not print document text. Uncached Docling assets may download during initialization. See the progress ledger for measured profiles and limitations.
 
 ## Local development
 
