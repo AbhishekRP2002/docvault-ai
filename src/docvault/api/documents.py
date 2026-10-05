@@ -3,8 +3,8 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Header, Query, UploadFile
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, defer
 
 from docvault.cache import calculate_json_fingerprint, notify_change
 from docvault.config import get_settings
@@ -353,6 +353,74 @@ def request_document_comparison(body: ComparisonCreate):
     return get_or_create_artifact_job(
         "comparison", body.version_ids, {"dimensions": body.dimensions}
     )
+
+
+@router.get("/comparisons")
+def list_document_comparisons(limit: int = Query(30, ge=1, le=200), offset: int = Query(0, ge=0)):
+    """List saved comparison runs and their original sources without loading result bodies."""
+    with session() as db:
+        total = db.scalar(
+            select(func.count()).select_from(Artifact).where(Artifact.kind == "comparison")
+        )
+        artifacts = list(
+            db.scalars(
+                select(Artifact)
+                .options(defer(Artifact.data))
+                .where(Artifact.kind == "comparison")
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        version_ids = {identifier for artifact in artifacts for identifier in artifact.version_ids}
+        sources = {}
+        if version_ids:
+            for identifier, filename, number, title, deleted_at in db.execute(
+                select(
+                    Version.id,
+                    Version.filename,
+                    Version.version_number,
+                    Document.title,
+                    Document.deleted_at,
+                )
+                .join(Document, Version.document_id == Document.id)
+                .where(Version.id.in_(version_ids))
+            ):
+                available = deleted_at is None
+                sources[identifier] = {
+                    "version_id": identifier,
+                    "title": title if available else "Deleted document",
+                    "filename": filename if available else None,
+                    "version_number": number,
+                    "available": available,
+                }
+        return {
+            "total": total or 0,
+            "items": [
+                {
+                    "id": artifact.id,
+                    "created_at": artifact.created_at,
+                    "status": artifact.status,
+                    "error": artifact.error,
+                    "version_ids": artifact.version_ids,
+                    "dimensions": artifact.options.get("dimensions", []),
+                    "sources": [
+                        sources.get(
+                            identifier,
+                            {
+                                "version_id": identifier,
+                                "title": "Unavailable document",
+                                "filename": None,
+                                "version_number": None,
+                                "available": False,
+                            },
+                        )
+                        for identifier in artifact.version_ids
+                    ],
+                }
+                for artifact in artifacts
+            ],
+        }
 
 
 @router.get("/artifacts/{artifact_id}")

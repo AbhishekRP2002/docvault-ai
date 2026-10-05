@@ -2,7 +2,12 @@ import { Markdown } from "./markdown";
 import { useQuery } from "@tanstack/react-query";
 import { LoaderCircle } from "lucide-react";
 import { api } from "@/lib/api";
-import type { Artifact, Insights, VaultDocument } from "@/lib/types";
+import type {
+  Artifact,
+  ComparisonSource,
+  Insights,
+  VaultDocument,
+} from "@/lib/types";
 import { ErrorState } from "./common";
 import { EvidenceLinks } from "./evidence-links";
 interface ComparisonRow {
@@ -18,10 +23,12 @@ export function ArtifactResult({
   id,
   versionId,
   documents = [],
+  sources = [],
 }: {
   id: string;
   versionId?: string;
   documents?: VaultDocument[];
+  sources?: ComparisonSource[];
 }) {
   const query = useQuery({
     queryKey: ["artifact", id],
@@ -69,15 +76,28 @@ export function ArtifactResult({
             <thead className="border-b bg-muted">
               <tr>
                 <th className="min-w-28 p-3 font-medium">Dimension</th>
-                {ids.map((version, index) => (
-                  <th key={version} className="min-w-48 p-3 font-medium">
-                    {documents.find(
-                      (d) =>
-                        d.current_version_id === version ||
-                        d.latest_version_id === version,
-                    )?.title || `Document ${index + 1}`}
-                  </th>
-                ))}
+                {ids.map((version, index) => {
+                  const source = sources.find(
+                    (item) => item.version_id === version,
+                  );
+                  const document = documents.find(
+                    (item) =>
+                      item.current_version_id === version ||
+                      item.latest_version_id === version,
+                  );
+                  return (
+                    <th key={version} className="min-w-48 p-3 font-medium">
+                      {source?.filename ||
+                        document?.title ||
+                        `Document ${index + 1}`}
+                      {source?.version_number != null && (
+                        <span className="mt-1 block text-[10px] font-normal text-muted-foreground">
+                          Version {source.version_number}
+                        </span>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody className="divide-y">

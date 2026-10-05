@@ -93,6 +93,26 @@ export interface Artifact {
   data: Record<string, unknown> | null;
   error: string | null;
 }
+export interface ComparisonSource {
+  version_id: string;
+  title: string;
+  filename: string | null;
+  version_number: number | null;
+  available: boolean;
+}
+export interface ComparisonRun {
+  id: string;
+  status: string;
+  created_at: string;
+  version_ids: string[];
+  dimensions: string[];
+  sources: ComparisonSource[];
+  error: string | null;
+}
+export interface ComparisonHistory {
+  items: ComparisonRun[];
+  total: number;
+}
 export interface ProviderConfig {
   provider: string;
   configured: boolean;

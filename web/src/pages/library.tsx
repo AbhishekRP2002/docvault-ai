@@ -4,6 +4,7 @@ import {
   ArrowRight,
   FileText,
   GitCompareArrows,
+  History,
   LayoutGrid,
   List,
   LoaderCircle,
@@ -61,6 +62,11 @@ const DocumentDetail = lazy(() =>
 const ArtifactResult = lazy(() =>
   import("@/components/artifact-result").then((m) => ({
     default: m.ArtifactResult,
+  })),
+);
+const ComparisonHistoryDialog = lazy(() =>
+  import("@/components/comparison-history").then((module) => ({
+    default: module.ComparisonHistoryDialog,
   })),
 );
 
@@ -123,6 +129,7 @@ export function Library({
     "Key themes, Similarities, Differences",
   );
   const [comparisonId, setComparisonId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const { uploads, uploading, upload } = transfer;
   const pendingUploads = uploads.filter((row) => !row.error).length;
   const failedUploads = uploads.length - pendingUploads;
@@ -186,6 +193,7 @@ export function Library({
     onSuccess: (result) => {
       setComparisonId(result.id);
       void client.invalidateQueries({ queryKey: ["artifact", result.id] });
+      void client.invalidateQueries({ queryKey: ["comparisons"] });
     },
   });
   return (
@@ -228,6 +236,13 @@ export function Library({
           )}
         </div>
         <div className="flex items-center gap-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setHistoryOpen(true)}
+          >
+            <History /> Comparisons
+          </Button>
           {(processing > 0 || uploading) && (
             <span
               role="status"
@@ -748,8 +763,9 @@ export function Library({
         <DialogContent className="max-w-2xl">
           <DialogTitle>Compare documents</DialogTitle>
           <DialogDescription>
-            Compare {selectedVersions.length} documents, with evidence from each
-            source.
+            {comparisonId
+              ? "You can close this window. Reopen this saved run from Files → Comparisons."
+              : `Compare ${selectedVersions.length} documents, with evidence from each source.`}
           </DialogDescription>
           {comparisonId ? (
             <div className="mt-6">
@@ -796,6 +812,13 @@ export function Library({
           )}
         </DialogContent>
       </Dialog>
+      {historyOpen && (
+        <Suspense
+          fallback={<DetailLoading onClose={() => setHistoryOpen(false)} />}
+        >
+          <ComparisonHistoryDialog onClose={() => setHistoryOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

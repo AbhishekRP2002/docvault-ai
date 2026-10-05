@@ -100,6 +100,7 @@ export default function App() {
         void client.invalidateQueries({ queryKey: ["metrics"] });
         void client.invalidateQueries({ queryKey: ["chats"] });
         void client.invalidateQueries({ queryKey: ["artifact"] });
+        void client.invalidateQueries({ queryKey: ["comparisons"] });
       };
       socket.onclose = () => {
         setConnected(false);
