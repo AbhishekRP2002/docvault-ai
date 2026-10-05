@@ -40,6 +40,12 @@ services:
     command: ["uv", "run", "--no-sync", "uvicorn", "docvault.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports: ["127.0.0.1:8000:8000"]
     volumes: ["files:/app/data"]
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-sync", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 60
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -66,7 +72,7 @@ services:
       context: ./web
     ports: ["127.0.0.1:5173:80"]
     depends_on:
-      api: {condition: service_started}
+      api: {condition: service_healthy}
 volumes:
   postgres_data:
   redis_data:
