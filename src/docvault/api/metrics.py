@@ -1,10 +1,12 @@
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, Query
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
 
 from docvault.db import session
-from docvault.models import Document, Job, LLMCall, MetricBucket, Version
+from docvault.models import Document, Job, JobAttempt, JobStageRun, LLMCall, MetricBucket, Version
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 
@@ -100,24 +102,118 @@ def get_document_metrics():
 
 
 @router.get("/processing")
-def get_processing_metrics():
-    """Return job counts and mean/p95 completed-job durations in milliseconds."""
+def get_processing_metrics(days: Annotated[int, Query(ge=1, le=90)] = 30):
+    """Report lifetime job totals, current backlog, and measured stage/retry activity.
+
+    Completed-job durations retain their lifetime scope for compatibility. Stage
+    samples and automatic retry attempts cover the trailing ``days`` UTC interval;
+    future, incomplete, and negative-duration records never become samples.
+    """
+    end = datetime.now(UTC)
+    start = end - timedelta(days=days)
     with session() as db:
         counts = dict(db.execute(select(Job.status, func.count()).group_by(Job.status)).all())
         seconds = func.extract("epoch", Job.finished_at - Job.started_at) * 1000
-        average, p95 = db.execute(
-            select(func.avg(seconds), func.percentile_cont(0.95).within_group(seconds)).where(
-                Job.status == "complete", Job.finished_at.is_not(None), Job.started_at.is_not(None)
+        average, p50, p95, samples = db.execute(
+            select(
+                func.avg(seconds),
+                func.percentile_cont(0.5).within_group(seconds),
+                func.percentile_cont(0.95).within_group(seconds),
+                func.count(),
+            ).where(
+                Job.status == "complete",
+                Job.finished_at.is_not(None),
+                Job.started_at.is_not(None),
+                Job.finished_at >= Job.started_at,
+                Job.finished_at <= end,
             )
         ).one()
-        return dict(
+        due_queued, retry_waiting, expired_leases, oldest_due = db.execute(
+            select(
+                func.count().filter(Job.status == "queued", Job.next_at <= end),
+                func.count().filter(Job.status == "queued", Job.next_at > end, Job.attempts > 0),
+                func.count().filter(
+                    Job.status.in_(["enqueued", "running"]), Job.lease_until <= end
+                ),
+                func.min(Job.next_at).filter(
+                    Job.status.in_(["queued", "enqueued"]), Job.next_at <= end
+                ),
+            )
+        ).one()
+        retry_attempts = db.scalar(
+            select(func.count())
+            .select_from(JobAttempt)
+            .where(
+                JobAttempt.attempt > 1,
+                JobAttempt.started_at >= start,
+                JobAttempt.started_at <= end,
+            )
+        )
+        stage_ms = func.extract("epoch", JobStageRun.finished_at - JobStageRun.started_at) * 1000
+        stage_durations = [
+            dict(stage=stage, sample_count=count, p50_ms=float(median), p95_ms=float(tail))
+            for stage, count, median, tail in db.execute(
+                select(
+                    JobStageRun.stage,
+                    func.count(),
+                    func.percentile_cont(0.5).within_group(stage_ms),
+                    func.percentile_cont(0.95).within_group(stage_ms),
+                )
+                .where(
+                    JobStageRun.status == "complete",
+                    JobStageRun.finished_at >= start,
+                    JobStageRun.finished_at <= end,
+                    JobStageRun.finished_at >= JobStageRun.started_at,
+                )
+                .group_by(JobStageRun.stage)
+                .order_by(JobStageRun.stage)
+            )
+        ]
+        result = dict(
             completed=counts.get("complete", 0),
             failed=counts.get("failed", 0),
+            dead_letters=counts.get("failed", 0),
             active=counts.get("running", 0),
             queued=counts.get("queued", 0) + counts.get("enqueued", 0),
+            due_queued=due_queued,
+            retry_waiting=retry_waiting,
+            enqueued=counts.get("enqueued", 0),
+            expired_leases=expired_leases,
+            oldest_due_job_age_seconds=(end - oldest_due).total_seconds()
+            if oldest_due is not None
+            else None,
+            automatic_retry_attempts=retry_attempts or 0,
             average_duration_ms=float(average) if average is not None else None,
+            p50_duration_ms=float(p50) if p50 is not None else None,
             p95_duration_ms=float(p95) if p95 is not None else None,
+            duration_sample_count=samples,
+            window_start=start.isoformat(),
+            window_end=end.isoformat(),
+            stage_durations=stage_durations,
         )
+    return {**result, **_read_consumer_metrics()}
+
+
+def _read_consumer_metrics() -> dict:
+    """Read queue consumers without converting an unavailable Redis into zero workers."""
+    from docvault.health import read_dispatcher_status, read_worker_status
+
+    try:
+        workers = read_worker_status()
+        dispatchers = read_dispatcher_status()
+    except RedisError:
+        return dict(
+            healthy_workers=None,
+            busy_workers=None,
+            healthy_dispatchers=None,
+            consumer_monitoring_error_code="redis_unavailable",
+        )
+    return dict(
+        healthy_workers=sum(worker.healthy for worker in workers),
+        busy_workers=sum(worker.healthy and worker.state == "busy" for worker in workers),
+        healthy_dispatchers=sum(dispatcher.healthy for dispatcher in dispatchers),
+        consumer_monitoring_error_code=None,
+    )
 
 
 @router.get("/usage")

@@ -167,10 +167,30 @@ def export_prometheus_metrics():
         **metrics.get_processing_metrics(),
         **metrics.get_llm_usage_metrics(),
     }
-    return (
-        "\n".join(f"docvault_{key} {value}" for key, value in data.items() if value is not None)
-        + "\n"
-    )
+    samples = [
+        f"docvault_{key} {value}"
+        for key, value in data.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    # These labels come only from the fixed processing pipeline, never source/user text.
+    stages = {
+        "conversion",
+        "chunking",
+        "persisting",
+        "embedding",
+        "activation",
+        "generating",
+        "cleanup",
+    }
+    for row in data.get("stage_durations", []):
+        stage = row["stage"]
+        if stage not in stages:
+            continue
+        for field in ("sample_count", "p50_ms", "p95_ms"):
+            value = row.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                samples.append(f'docvault_stage_{field}{{stage="{stage}"}} {value}')
+    return "\n".join(samples) + "\n"
 
 
 @app.websocket("/v1/events")
