@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from docvault.cache import calculate_json_fingerprint
-from docvault.config import Settings
+from docvault.config import Settings, get_settings
 from docvault.llm import prompts
 from docvault.llm.config import (
     ChatModelSettings,
@@ -114,10 +114,57 @@ def test_task_settings_own_disjoint_fields_and_aggregate_preserves_them():
     assert set(LLMSettings.model_fields) == set(fields)
 
 
+def test_application_inherits_model_settings_without_redeclaring_them(clean_model_environment):
+    """Application and standalone providers share every model field and default."""
+    assert set(Settings.__annotations__).isdisjoint(LLMSettings.model_fields)
+    settings = Settings(_env_file=None)
+    llm_settings = LLMSettings(_env_file=None)
+    for task in ("chat", "conversation_summary", "summary", "comparison"):
+        assert settings.generation_model(task) == llm_settings.generation_model(task)
+    assert settings.embedding_model() == llm_settings.embedding_model()
+
+
+@pytest.mark.parametrize("settings_class", [Settings, LLMSettings, ChatModelSettings])
+def test_chat_model_priority_is_constructor_environment_dotenv_then_default(
+    clean_model_environment, monkeypatch, tmp_path, settings_class
+):
+    """All entry points retain the same source priority after model defaults are unified."""
+    dotenv = tmp_path / "models.env"
+    dotenv.write_text("OPENROUTER_CHAT_MODEL=test/dotenv-chat\n")
+    assert settings_class(_env_file=None).openrouter_chat_model == "openai/gpt-6-luna"
+    assert settings_class(_env_file=dotenv).openrouter_chat_model == "test/dotenv-chat"
+    monkeypatch.setenv("OPENROUTER_CHAT_MODEL", "test/environment-chat")
+    assert settings_class(_env_file=dotenv).openrouter_chat_model == "test/environment-chat"
+    assert (
+        settings_class(
+            _env_file=dotenv, openrouter_chat_model="test/constructor-chat"
+        ).openrouter_chat_model
+        == "test/constructor-chat"
+    )
+
+
+def test_cached_application_settings_reload_only_after_cache_clear(
+    clean_model_environment, monkeypatch
+):
+    """Existing clients keep their settings snapshot until the application reloads it."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    get_settings.cache_clear()
+    try:
+        monkeypatch.setenv("OPENROUTER_CHAT_MODEL", "test/first-chat")
+        first = get_settings()
+        monkeypatch.setenv("OPENROUTER_CHAT_MODEL", "test/second-chat")
+        assert get_settings() is first
+        assert get_settings().generation_model("chat").model == "test/first-chat"
+        get_settings.cache_clear()
+        assert get_settings().generation_model("chat").model == "test/second-chat"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_application_settings_retains_task_overrides_and_validated_profiles(
     clean_model_environment, monkeypatch
 ):
-    """Existing app-level defaults and environment overrides survive the settings split."""
+    """Application settings retain environment overrides and inherited model defaults."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)
     monkeypatch.setenv("OPENROUTER_CHAT_MODEL", "test/application-chat")
     monkeypatch.setenv("OPENROUTER_COMPARISON_MODEL", "test/application-comparison")
@@ -155,7 +202,7 @@ def test_default_dotenv_is_respected_and_none_disables_it(
     dotenv.write_text("OPENROUTER_SUMMARY_MODEL=test/default-dotenv\n")
     monkeypatch.setitem(LLMSettings.model_config, "env_file", dotenv)
     assert LLMSettings().generation_model("summary").model == "test/default-dotenv"
-    assert LLMSettings(_env_file=None).generation_model("summary").model == "openai/gpt-4.1-mini"
+    assert LLMSettings(_env_file=None).generation_model("summary").model == "openai/gpt-5.6-luna"
 
 
 def test_dotenv_values_remain_validated(clean_model_environment, tmp_path):
@@ -167,19 +214,22 @@ def test_dotenv_values_remain_validated(clean_model_environment, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "task,model",
+    "task,model,output_tokens",
     [
-        ("chat", "openai/gpt-4.1-mini"),
-        ("conversation_summary", "openai/gpt-4.1-mini"),
-        ("summary", "openai/gpt-4.1-mini"),
-        ("comparison", "openai/gpt-4.1"),
+        ("chat", "openai/gpt-6-luna", 4096),
+        ("conversation_summary", "openai/gpt-5.6-luna", 2048),
+        ("summary", "openai/gpt-5.6-luna", 4096),
+        ("comparison", "openai/gpt-5.6-luna", 4096),
     ],
 )
-def test_default_generation_models_are_selected_by_task(clean_model_environment, task, model):
+def test_default_generation_models_are_selected_by_task(
+    clean_model_environment, task, model, output_tokens
+):
     settings = LLMSettings(_env_file=None)
     configuration = settings.generation_model(task)
     assert configuration.model == model
-    assert configuration.context_tokens == 128000
+    assert configuration.context_tokens == 1_050_000
+    assert configuration.max_output_tokens == output_tokens
     assert settings.embedding_model().model == "openai/text-embedding-3-small"
     assert settings.embedding_model().dimensions == 1536
 

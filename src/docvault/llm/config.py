@@ -8,6 +8,8 @@ from pydantic_settings.sources import ENV_FILE_SENTINEL, DotenvType
 
 LLMTask = Literal["chat", "conversation_summary", "summary", "comparison"]
 
+DEFAULT_CONTEXT_TOKENS = 1_050_000
+
 
 class GenerationModelConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -38,8 +40,6 @@ class EnvironmentSettings(BaseSettings):
         super().__init__(_env_file=_env_file, **values)
 
 
-# Explicit subclass constructors keep _env_file visible to static type checkers;
-# otherwise Pydantic's synthesized field-only signatures omit that option.
 class OpenRouterSettings(EnvironmentSettings):
     """Connection settings shared by generation and embedding requests."""
 
@@ -58,12 +58,10 @@ class ChatModelSettings(EnvironmentSettings):
         """Expose the dotenv override while preserving settings validation."""
         super().__init__(_env_file=_env_file, **values)
 
-    openrouter_chat_model: str = "openai/gpt-4.1-mini"
-    # Retain the original environment names for the chat task.
-    openrouter_context_tokens: int = Field(default=128000, gt=0)
+    openrouter_chat_model: str = "openai/gpt-6-luna"
+    openrouter_context_tokens: int = Field(default=DEFAULT_CONTEXT_TOKENS, gt=0)
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_chat_temperature: float | None = None
-    # Maximum tool-use rounds within one answer; each round may call multiple tools.
     agent_max_tool_rounds: int = Field(default=20, gt=0)
 
     def chat_model_configuration(self) -> GenerationModelConfig:
@@ -83,8 +81,10 @@ class ConversationSummaryModelSettings(EnvironmentSettings):
         """Expose the dotenv override while preserving settings validation."""
         super().__init__(_env_file=_env_file, **values)
 
-    openrouter_conversation_summary_model: str = "openai/gpt-4.1-mini"
-    openrouter_conversation_summary_context_tokens: int = Field(default=128000, gt=0)
+    openrouter_conversation_summary_model: str = "openai/gpt-5.6-luna"
+    openrouter_conversation_summary_context_tokens: int = Field(
+        default=DEFAULT_CONTEXT_TOKENS, gt=0
+    )
     openrouter_conversation_summary_max_output_tokens: int = Field(default=2048, gt=0)
     openrouter_conversation_summary_temperature: float | None = None
 
@@ -105,8 +105,8 @@ class SummaryModelSettings(EnvironmentSettings):
         """Expose the dotenv override while preserving settings validation."""
         super().__init__(_env_file=_env_file, **values)
 
-    openrouter_summary_model: str = "openai/gpt-4.1-mini"
-    openrouter_summary_context_tokens: int = Field(default=128000, gt=0)
+    openrouter_summary_model: str = "openai/gpt-5.6-luna"
+    openrouter_summary_context_tokens: int = Field(default=DEFAULT_CONTEXT_TOKENS, gt=0)
     openrouter_summary_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_summary_temperature: float | None = None
 
@@ -127,8 +127,8 @@ class ComparisonModelSettings(EnvironmentSettings):
         """Expose the dotenv override while preserving settings validation."""
         super().__init__(_env_file=_env_file, **values)
 
-    openrouter_comparison_model: str = "openai/gpt-4.1"
-    openrouter_comparison_context_tokens: int = Field(default=128000, gt=0)
+    openrouter_comparison_model: str = "openai/gpt-5.6-luna"
+    openrouter_comparison_context_tokens: int = Field(default=DEFAULT_CONTEXT_TOKENS, gt=0)
     openrouter_comparison_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_comparison_temperature: float | None = None
 

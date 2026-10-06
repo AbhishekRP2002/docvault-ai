@@ -25,13 +25,15 @@ Upload documents in **Files**, wait for processing to finish, then start a chat 
 
 Only `OPENROUTER_API_KEY` needs to be filled in to get started. The other values in `.env.example` already have defaults.
 
+Model defaults live in [src/docvault/llm/config.py](src/docvault/llm/config.py). Values in `.env` override them; process environment variables override `.env`. Restart services after changing configuration. The table lists the values supplied by `.env.example`.
+
 | Variable | Purpose | Value in `.env.example` |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | Required API key for model requests | Set your key |
-| `OPENROUTER_CHAT_MODEL` | Chat and suggested follow-ups | `openai/gpt-4.1-mini` |
-| `OPENROUTER_SUMMARY_MODEL` | Document summaries and insights | `openai/gpt-4.1-mini` |
-| `OPENROUTER_COMPARISON_MODEL` | Document comparisons | `openai/gpt-4.1` |
-| `OPENROUTER_CONVERSATION_SUMMARY_MODEL` | Condense older chat history | `openai/gpt-4.1-mini` |
+| `OPENROUTER_CHAT_MODEL` | Chat and suggested follow-ups | `openai/gpt-6-luna` |
+| `OPENROUTER_SUMMARY_MODEL` | Document summaries and insights | `openai/gpt-5.6-luna` |
+| `OPENROUTER_COMPARISON_MODEL` | Document comparisons | `openai/gpt-5.6-luna` |
+| `OPENROUTER_CONVERSATION_SUMMARY_MODEL` | Condense older chat history | `openai/gpt-5.6-luna` |
 | `OPENROUTER_EMBEDDING_MODEL` | Document search embeddings | `openai/text-embedding-3-small` |
 | `AGENT_MAX_TOOL_ROUNDS` | Maximum tool-use rounds per answer | `20` |
 

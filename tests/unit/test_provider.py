@@ -537,7 +537,10 @@ async def test_invalid_embedding_dimensions_preserve_reported_usage():
 
 
 @pytest.mark.asyncio
-async def test_model_context_metadata_is_cached_across_tasks_and_clients(monkeypatch):
+@pytest.mark.parametrize("configured_context", [1000, 1_050_000])
+async def test_model_context_metadata_is_cached_across_tasks_and_clients(
+    monkeypatch, configured_context
+):
     """Actual model capacity overrides a configured fallback without recording generation usage."""
     monkeypatch.setattr("docvault.llm.provider.MODEL_CONTEXT_CACHE", {})
     requested, usage = [], []
@@ -567,8 +570,8 @@ async def test_model_context_metadata_is_cached_across_tasks_and_clients(monkeyp
     options = {
         "openrouter_chat_model": "test/actual-model",
         "openrouter_comparison_model": "test/actual-model",
-        "openrouter_context_tokens": 1000,
-        "openrouter_comparison_context_tokens": 1000,
+        "openrouter_context_tokens": configured_context,
+        "openrouter_comparison_context_tokens": configured_context,
     }
     first, second = (
         create_provider(handler, record, **options),
@@ -582,6 +585,20 @@ async def test_model_context_metadata_is_cached_across_tasks_and_clients(monkeyp
         await first.close()
         await second.close()
     assert requested == ["/v1/models"] and usage == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task", ["chat", "conversation_summary", "summary", "comparison"])
+async def test_luna_context_defaults_are_used_when_metadata_is_unavailable(monkeypatch, task):
+    """Every generation task retains the larger planning budget through a metadata outage."""
+    monkeypatch.setattr("docvault.llm.provider.MODEL_CONTEXT_CACHE", {})
+    for field in LLMSettings.model_fields:
+        monkeypatch.delenv(field.upper(), raising=False)
+    llm = create_provider(lambda request: httpx.Response(503))
+    try:
+        assert await llm.resolve_model_context_tokens(task) == 1_050_000
+    finally:
+        await llm.close()
 
 
 @pytest.mark.asyncio

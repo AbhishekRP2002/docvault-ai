@@ -3,14 +3,13 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import Field
-from pydantic_settings import SettingsConfigDict
 from pydantic_settings.sources import ENV_FILE_SENTINEL, DotenvType
 
 from docvault.llm.config import LLMSettings
 
 
 class Settings(LLMSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    """Application settings inherit model definitions and dotenv loading from LLMSettings."""
 
     def __init__(self, *, _env_file: DotenvType | None = ENV_FILE_SENTINEL, **values: Any) -> None:
         """Expose the dotenv override to type checkers while preserving settings validation."""
@@ -29,7 +28,6 @@ class Settings(LLMSettings):
     storage_min_free_bytes: int = Field(default=0, ge=0)
     redis_url: str = "redis://localhost:16379/0"
     storage_path: Path = Path("data")
-    openrouter_chat_model: str = "openai/gpt-6-luna"
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     max_upload_bytes: int = 25 * 1024 * 1024
     chat_rate_per_minute: int = 20
