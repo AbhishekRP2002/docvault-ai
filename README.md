@@ -2,6 +2,10 @@
 
 DocVault is a local workspace for PDF, DOCX, and TXT documents. Upload files, get summaries and key insights, compare documents, and chat with source citations. It uses React, FastAPI, PostgreSQL/pgvector, Redis, Docling, and OpenRouter.
 
+## Design choices and assumptions
+
+See [design-decisions.md](docs/design-decisions.md) for why we chose OpenRouter, Docling, LangGraph, hybrid retrieval, background jobs, and immutable source versions, along with assignment assumptions and the planned LiteParse evaluation.
+
 ## Setup
 
 Install Docker with Compose (Docker Desktop includes both). No local Python or Node installation is required.
