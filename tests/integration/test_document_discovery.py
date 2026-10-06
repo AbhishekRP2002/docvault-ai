@@ -51,7 +51,7 @@ def persist_overview(version_id: str, vector: list[float] = QUERY_VECTOR) -> Non
 
 
 def test_native_hybrid_discovery_current_live_scope_and_scores(discovery_database):
-    """Topic discovery uses HNSW/GIN SQL, ignores obsolete/deleted sources and bypasses 0.7."""
+    """Topic discovery uses HNSW/GIN SQL, ignores obsolete/deleted sources and has no passage similarity floor."""
     selected, _ = seed_overview_source("renewal.txt")
     archived, _ = seed_overview_source("archived.txt")
     deleted, _ = seed_overview_source("deleted.txt")

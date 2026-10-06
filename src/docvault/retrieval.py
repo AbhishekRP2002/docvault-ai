@@ -14,15 +14,15 @@ from docvault.models import Chunk, Version
 SEMANTIC_CANDIDATE_LIMIT = 15
 LEXICAL_CANDIDATE_LIMIT = 15
 RETRIEVED_CHUNK_LIMIT = 5
-MIN_COSINE_SIMILARITY = 0.7
-# pgvector returns cosine distance; similarity > 0.7 means distance < 0.3.
-MAX_COSINE_DISTANCE = 0.3
+MIN_COSINE_SIMILARITY = 0.6
+# Only semantic candidates use this floor; pgvector returns 1 - cosine similarity.
+MAX_COSINE_DISTANCE = 1 - MIN_COSINE_SIMILARITY
 RETRIEVAL_CONFIGURATION = {
-    "pipeline": "hybrid-global-rrf-v3",
+    "pipeline": "hybrid-independent-rrf-v4",
     "semantic_candidates": SEMANTIC_CANDIDATE_LIMIT,
     "lexical_candidates": LEXICAL_CANDIDATE_LIMIT,
     "final_chunks": RETRIEVED_CHUNK_LIMIT,
-    "min_cosine_similarity": MIN_COSINE_SIMILARITY,
+    "semantic_min_cosine_similarity": MIN_COSINE_SIMILARITY,
 }
 
 
@@ -96,16 +96,14 @@ def build_semantic_candidates_query(version_ids: list[str], vector: list[float])
     )
 
 
-def build_lexical_candidates_query(query: str, version_ids: list[str], vector: list[float]):
-    """Rank scoped full-text matches that also satisfy the shared cosine-similarity floor."""
+def build_lexical_candidates_query(query: str, version_ids: list[str]):
+    """Rank scoped full-text matches independently of semantic scores or embeddings."""
     terms = func.websearch_to_tsquery("english", query)
     return (
         select(Chunk)
         .where(
             Chunk.version_id.in_(version_ids),
             Chunk.search.op("@@")(terms),
-            Chunk.embedding.is_not(None),
-            Chunk.embedding.cosine_distance(vector) < MAX_COSINE_DISTANCE,
         )
         .order_by(func.ts_rank_cd(Chunk.search, terms).desc(), Chunk.id)
         .limit(LEXICAL_CANDIDATE_LIMIT)
@@ -117,8 +115,10 @@ async def retrieve_relevant_chunks(query: str, version_ids: list[str], llm) -> l
 
     Reuse query embeddings and reject versions indexed with a different embedding model.
     HNSW is approximate; iterative filtering has bounded work and no exhaustive fallback.
-    Both candidate sets require cosine similarity strictly above 0.7; return fewer or none
-    when evidence does not qualify, without padding results or guaranteeing every source.
+    Semantic candidates require cosine similarity strictly above 0.6; lexical candidates
+    qualify by full-text matching alone. RRF combines both lists without a final cosine
+    filter. Return fewer or none when neither branch matches, without padding results or
+    guaranteeing every source.
     """
     settings = get_settings()
     with session() as db:
@@ -137,9 +137,7 @@ async def retrieve_relevant_chunks(query: str, version_ids: list[str], llm) -> l
         configure_hnsw_search(db)
         versions_by_id = {version.id: version for version in versions}
         dense = list(db.scalars(build_semantic_candidates_query(list(versions_by_id), vector)))
-        lexical = list(
-            db.scalars(build_lexical_candidates_query(query, list(versions_by_id), vector))
-        )
+        lexical = list(db.scalars(build_lexical_candidates_query(query, list(versions_by_id))))
         evidence = {
             chunk.id: create_cited_evidence_record(chunk, versions_by_id[chunk.version_id])
             for chunk in dense + lexical

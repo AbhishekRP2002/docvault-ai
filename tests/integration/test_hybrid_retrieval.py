@@ -355,7 +355,7 @@ def test_hnsw_default_plan_filtered_recall_and_keyword_rescue(migrated_database)
                 .where(
                     Chunk.version_id == selected_id,
                     Chunk.embedding.is_not(None),
-                    Chunk.embedding.cosine_distance(QUERY_VECTOR) < 0.3,
+                    Chunk.embedding.cosine_distance(QUERY_VECTOR) < retrieval.MAX_COSINE_DISTANCE,
                 )
                 .order_by(Chunk.embedding.cosine_distance(QUERY_VECTOR) + 0)
                 .limit(15)
@@ -455,32 +455,33 @@ def cosine_vector(similarity: float) -> list[float]:
     return [similarity, math.sqrt(1 - similarity**2)] + [0.0] * 1534
 
 
-def test_global_candidate_and_final_limits_with_similarity_floor(migrated_database):
-    """Apply 15/15/5 across all selected sources and reject low-similarity keyword matches."""
+def test_global_candidate_and_final_limits_with_independent_lexical_matches(migrated_database):
+    """Apply 15/15/5 globally while lexical hits contribute independently of embeddings."""
     selected = [seed_version("first.txt"), seed_version("second.txt")]
     excluded = seed_version("outside.txt")
     rows = [
         chunk_row(selected[index % 2], index, cosine_vector(0.98 - index * 0.003), "Payment terms")
         for index in range(24)
     ]
-    rejected = [
-        chunk_row(selected[0], 25, cosine_vector(0.69), "Payment payment payment payment"),
+    lexical_only = [
+        chunk_row(selected[0], 25, cosine_vector(0.1), "Payment payment payment payment"),
         chunk_row(selected[1], 26, None, "Payment payment payment payment"),
-        chunk_row(excluded, 27, QUERY_VECTOR, "Payment payment payment payment"),
     ]
+    outside = chunk_row(excluded, 27, QUERY_VECTOR, "Payment payment payment payment")
     with migrated_database.engine.begin() as connection:
-        connection.execute(insert(Chunk), rows + rejected)
+        connection.execute(insert(Chunk), rows + lexical_only + [outside])
     with database.session() as db:
         retrieval.configure_hnsw_search(db)
         semantic = list(
             db.scalars(retrieval.build_semantic_candidates_query(selected, QUERY_VECTOR))
         )
-        lexical = list(
-            db.scalars(retrieval.build_lexical_candidates_query("payment", selected, QUERY_VECTOR))
-        )
+        lexical = list(db.scalars(retrieval.build_lexical_candidates_query("payment", selected)))
         assert len(semantic) == len(lexical) == 15
         assert {chunk.version_id for chunk in semantic} == set(selected)
-        assert not {chunk.id for chunk in semantic + lexical} & {row["id"] for row in rejected}
+        assert {chunk.version_id for chunk in lexical} == set(selected)
+        assert not {chunk.id for chunk in semantic} & {row["id"] for row in lexical_only}
+        assert {row["id"] for row in lexical_only} <= {chunk.id for chunk in lexical}
+        assert outside["id"] not in {chunk.id for chunk in semantic + lexical}
     llm = FixedEmbeddingLLM()
     evidence = asyncio.run(retrieval.retrieve_relevant_chunks("payment", selected, llm))
     expected = retrieval.calculate_rrf(
@@ -492,17 +493,17 @@ def test_global_candidate_and_final_limits_with_similarity_floor(migrated_databa
 
 
 @pytest.mark.parametrize("qualifying_count", [0, 2])
-def test_similarity_floor_never_pads_missing_evidence(migrated_database, qualifying_count):
-    """Return fewer than five or no chunks rather than including strong lexical-only matches."""
+def test_semantic_floor_never_pads_when_neither_branch_matches(migrated_database, qualifying_count):
+    """Admit semantic scores above 0.6; do not pad with low scores lacking keyword matches."""
     selected = seed_version()
     accepted = [
-        chunk_row(selected, index, cosine_vector(0.71 + index * 0.01), "Notice terms")
+        chunk_row(selected, index, cosine_vector(0.61 + index * 0.01), "Cancellation terms")
         for index in range(qualifying_count)
     ]
     rejected = [
-        chunk_row(selected, 10, cosine_vector(0.69), "Notice notice notice"),
-        chunk_row(selected, 11, cosine_vector(0), "Notice notice notice"),
-        chunk_row(selected, 12, None, "Notice notice notice"),
+        chunk_row(selected, 10, cosine_vector(0.59), "Unrelated details"),
+        chunk_row(selected, 11, cosine_vector(0), "Unrelated details"),
+        chunk_row(selected, 12, None, "Unrelated details"),
     ]
     with migrated_database.engine.begin() as connection:
         connection.execute(insert(Chunk), accepted + rejected)
@@ -512,12 +513,12 @@ def test_similarity_floor_never_pads_missing_evidence(migrated_database, qualify
     assert {item.id for item in evidence} == {str(row["id"]) for row in accepted}
 
 
-def test_similarity_floor_excludes_exact_native_distance_boundary(migrated_database, monkeypatch):
-    """Verify strict comparison using the database's own boundary value, avoiding float guesses."""
+def test_semantic_floor_boundary_does_not_filter_lexical_matches(migrated_database, monkeypatch):
+    """Verify a strict native-distance boundary on semantic candidates only."""
     selected = seed_version()
-    nearer = chunk_row(selected, 0, cosine_vector(0.81), "Payment terms")
-    boundary = chunk_row(selected, 1, cosine_vector(0.8), "Payment terms")
-    farther = chunk_row(selected, 2, cosine_vector(0.79), "Payment terms")
+    nearer = chunk_row(selected, 0, cosine_vector(0.61), "Payment terms")
+    boundary = chunk_row(selected, 1, cosine_vector(0.6), "Payment terms")
+    farther = chunk_row(selected, 2, cosine_vector(0.59), "Payment terms")
     with migrated_database.engine.begin() as connection:
         connection.execute(insert(Chunk), [nearer, boundary, farther])
     with database.session() as db:
@@ -531,10 +532,27 @@ def test_similarity_floor_excludes_exact_native_distance_boundary(migrated_datab
         semantic = list(
             db.scalars(retrieval.build_semantic_candidates_query([selected], QUERY_VECTOR))
         )
-        lexical = list(
-            db.scalars(
-                retrieval.build_lexical_candidates_query("payment", [selected], QUERY_VECTOR)
-            )
-        )
+        lexical = list(db.scalars(retrieval.build_lexical_candidates_query("payment", [selected])))
         assert [chunk.id for chunk in semantic] == [nearer["id"]]
-        assert [chunk.id for chunk in lexical] == [nearer["id"]]
+        assert {chunk.id for chunk in lexical} == {
+            str(row["id"]) for row in [nearer, boundary, farther]
+        }
+
+
+@pytest.mark.parametrize("embedding", [cosine_vector(0.1), None])
+def test_lexical_only_evidence_survives_fusion_without_cosine_filter(migrated_database, embedding):
+    """An exact term can reach the agent with weak or missing vectors, within selected scope."""
+    selected = seed_version()
+    outside = seed_version("unselected.txt")
+    match = chunk_row(selected, 0, embedding, "Zephyrquartz requires 30 days notice.")
+    with migrated_database.engine.begin() as connection:
+        connection.execute(
+            insert(Chunk),
+            [match, chunk_row(outside, 0, QUERY_VECTOR, "Zephyrquartz requires 90 days notice.")],
+        )
+    evidence = asyncio.run(
+        retrieval.retrieve_relevant_chunks("zephyrquartz", [selected], FixedEmbeddingLLM())
+    )
+    assert [item.id for item in evidence] == [match["id"]]
+    assert evidence[0].version_id == selected
+    assert evidence[0].text == match["text"]

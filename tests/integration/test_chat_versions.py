@@ -1,6 +1,7 @@
 """Verify active document replacement without rewriting historical turn snapshots."""
 
 import hashlib
+import math
 from uuid import uuid4
 
 import pytest
@@ -126,7 +127,11 @@ def test_pending_replacement_uses_previous_ready_version_until_activation(api):
     assert "30 days" in answer.json()["content"]
 
 
-def test_retrieval_policy_change_invalidates_completed_answer_reuse(api, monkeypatch):
+@pytest.mark.parametrize(
+    "key,value",
+    [("semantic_min_cosine_similarity", 0.8), ("pipeline", "changed-retrieval-policy")],
+)
+def test_retrieval_policy_change_invalidates_completed_answer_reuse(api, monkeypatch, key, value):
     """Reuse an identical source/question profile but call the provider after policy changes."""
     source = ready_source()
     first_id = create_chat(api, [source])
@@ -135,7 +140,30 @@ def test_retrieval_policy_change_invalidates_completed_answer_reuse(api, monkeyp
     second_id = create_chat(api, [source])
     assert ask(api, second_id).status_code == 200
     assert len(api.llm.calls) == 1
-    monkeypatch.setitem(chat_module.RETRIEVAL_CONFIGURATION, "min_cosine_similarity", 0.8)
+    monkeypatch.setitem(chat_module.RETRIEVAL_CONFIGURATION, key, value)
     third_id = create_chat(api, [source])
     assert ask(api, third_id).status_code == 200
     assert len(api.llm.calls) == 2
+
+
+@pytest.mark.parametrize("similarity,question", [(0.65, "deadline"), (0.2, "payment")])
+def test_semantic_or_lexical_evidence_reaches_agent_and_persisted_citation(
+    api, similarity, question
+):
+    """Both relaxed semantic matches and independent keyword matches support real chat turns."""
+    source = ready_source()
+    with session() as db, db.begin():
+        chunk = db.scalar(select(Chunk).where(Chunk.version_id == source.version))
+        assert chunk is not None
+        chunk.embedding = [similarity, math.sqrt(1 - similarity**2)] + [0.0] * 1534
+        chunk_id = chunk.id
+    chat_id = create_chat(api, [source])
+    response = ask(api, chat_id, question=question)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "complete"
+    assert "30 days" in result["content"]
+    assert [item["chunk_id"] for item in result["citations"]] == [chunk_id]
+    assert result["agent_trace"][0]["evidence_ids"] == [chunk_id]
+    history = api.client.get(f"/v1/chats/{chat_id}/messages").json()["items"]
+    assert history[-1] == result

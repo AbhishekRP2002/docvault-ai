@@ -241,10 +241,10 @@ class DocumentToolRuntime:
                         "status": "ok",
                         "passages": [build_llm_evidence_record(item) for item in evidence],
                         "match_count": len(evidence),
-                        "coverage": "Similarity-qualified matches only; not a whole-document read.",
+                        "coverage": "Hybrid semantic and keyword matches; not a whole-document read.",
                         **(
                             {
-                                "next_step": "Call get_selected_document_overviews before concluding evidence is unavailable; it provides bounded original supporting snippets without the similarity filter.",
+                                "next_step": "Call get_selected_document_overviews before concluding evidence is unavailable; it provides bounded original supporting snippets.",
                             }
                             if not evidence
                             else {}
