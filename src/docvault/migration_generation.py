@@ -21,6 +21,58 @@ BEGIN
 END $$;
 """
 
+WORKSPACE_CHANGE_TABLES = (
+    "documents",
+    "document_versions",
+    "chats",
+    "messages",
+    "artifacts",
+    "llm_calls",
+    "jobs",
+)
+
+
+def _workspace_revision_operations() -> tuple[list[ops.ExecuteSQLOp], list[ops.ExecuteSQLOp]]:
+    """Generate transaction-scoped revision triggers together with their additive table.
+
+    Appending one record per transaction avoids a global counter lock across
+    document/job locks. SQL commit/rollback owns revisions; Redis is only a hint.
+    Request metrics, job heartbeat leases and raw chunk writes are excluded.
+    """
+    upgrade = [
+        ops.ExecuteSQLOp(
+            "INSERT INTO workspace_revisions (transaction_id, epoch) VALUES (0, gen_random_uuid()::text)"
+        ),
+        ops.ExecuteSQLOp("""CREATE FUNCTION record_workspace_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE format('INSERT INTO %I.workspace_revisions (transaction_id) VALUES ($1) ON CONFLICT (transaction_id) DO NOTHING', TG_TABLE_SCHEMA)
+        USING txid_current();
+    RETURN NULL;
+END $$;"""),
+    ]
+    downgrade = []
+    for table in WORKSPACE_CHANGE_TABLES:
+        upgrade.append(
+            ops.ExecuteSQLOp(
+                f"CREATE TRIGGER workspace_change_insert_delete AFTER INSERT OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION record_workspace_change()"
+            )
+        )
+        columns = (
+            " OF status, stage, attempts, error, error_code, next_at, started_at, finished_at"
+            if table == "jobs"
+            else ""
+        )
+        upgrade.append(
+            ops.ExecuteSQLOp(
+                f"CREATE TRIGGER workspace_change_update AFTER UPDATE{columns} ON {table} FOR EACH ROW WHEN (OLD IS DISTINCT FROM NEW) EXECUTE FUNCTION record_workspace_change()"
+            )
+        )
+        for name in ("workspace_change_insert_delete", "workspace_change_update"):
+            downgrade.append(ops.ExecuteSQLOp(f"DROP TRIGGER {name} ON {table}"))
+    downgrade.append(ops.ExecuteSQLOp("DROP FUNCTION record_workspace_change()"))
+    return upgrade, downgrade
+
 
 @renderers.dispatch_for(ops.RenameTableOp)
 def render_table_rename(autogen_context, operation: ops.RenameTableOp) -> str:
@@ -115,3 +167,10 @@ def prepare_generated_migration(context, revision, directives) -> None:
         _replace_ledger_table_rename(context, script.downgrade_ops, "llm_calls", "ai_calls")
         if _creates_hnsw_index(script.upgrade_ops):
             script.upgrade_ops.ops.insert(0, ops.ExecuteSQLOp(PGVECTOR_REQUIREMENT_CHECK))
+        if any(
+            isinstance(item, ops.CreateTableOp) and item.table_name == "workspace_revisions"
+            for item in script.upgrade_ops.ops
+        ):
+            upgrade, downgrade = _workspace_revision_operations()
+            script.upgrade_ops.ops.extend(upgrade)
+            script.downgrade_ops.ops[:0] = downgrade

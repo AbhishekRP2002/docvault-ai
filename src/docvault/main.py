@@ -7,17 +7,19 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from redis.asyncio import Redis as AsyncRedis
+from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 
 from docvault.api import chats, diagnostics, documents, metrics
 from docvault.cache import count_metric
 from docvault.config import get_settings
 from docvault.errors import AppError
 from docvault.health import SystemDiagnostics, read_system_diagnostics
+from docvault.workspace_events import read_workspace_revision
 
 logger = logging.getLogger("docvault")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -195,7 +197,7 @@ def export_prometheus_metrics():
 
 @app.websocket("/v1/events")
 async def stream_workspace_events(websocket: WebSocket):
-    """Reject disallowed origins, then emit Redis update hints and periodic snapshot revisions."""
+    """Publish committed revisions; stable snapshots recover lost Redis hints without reloads."""
     origin = websocket.headers.get("origin")
     if origin and origin not in get_settings().cors_origins:
         await websocket.close(code=1008)
@@ -205,24 +207,33 @@ async def stream_workspace_events(websocket: WebSocket):
         get_settings().redis_url, socket_connect_timeout=2, socket_timeout=3
     )
     try:
-        await websocket.send_json({"type": "snapshot", "revision": time.time_ns()})
-        # Notifications accelerate updates; regular snapshots recover a lost Redis event.
         async with client.pubsub() as subscriber:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(RedisError):
                 await subscriber.subscribe("docvault:events")
+            await websocket.send_json(
+                {"type": "snapshot", "revision": await asyncio.to_thread(read_workspace_revision)}
+            )
             while True:
                 try:
                     event = await subscriber.get_message(ignore_subscribe_messages=True, timeout=2)
-                except Exception:
+                except RedisError:
                     event = None
                     await asyncio.sleep(2)
+                    with contextlib.suppress(RedisError):
+                        await subscriber.subscribe("docvault:events")
                 await websocket.send_json(
-                    jsonable_encoder(
-                        {"type": "update" if event else "snapshot", "revision": time.time_ns()}
-                    )
+                    {
+                        "type": "update" if event else "snapshot",
+                        "revision": await asyncio.to_thread(read_workspace_revision),
+                    }
                 )
                 await asyncio.sleep(1)
-    except (WebSocketDisconnect, RuntimeError):
+    except (SQLAlchemyError, RuntimeError) as exc:
+        # Closing enables the frontend's disconnected polling/reconnect fallback.
+        logger.warning("Workspace events unavailable: %s", type(exc).__name__)
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.close(code=1013)
+    except WebSocketDisconnect:
         pass
     finally:
         await client.aclose()

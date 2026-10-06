@@ -25,6 +25,7 @@ import {
 import { PastRunRow } from "@/components/past-run-row";
 import { ErrorState, LoadingRows, PageSkeleton } from "@/components/common";
 import { useDocumentUploads } from "@/hooks/use-document-uploads";
+import { createWorkspaceEventReconciler } from "@/lib/workspace-events";
 const Library = lazy(() =>
   import("@/pages/library").then((m) => ({ default: m.Library })),
 );
@@ -93,20 +94,22 @@ export default function App() {
     function connect() {
       const url = new URL(`${API_URL}/v1/events`, window.location.origin);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(url);
-      socket.onopen = () => setConnected(true);
-      socket.onmessage = () => {
-        void client.invalidateQueries({ queryKey: ["documents"] });
-        void client.invalidateQueries({ queryKey: ["metrics"] });
-        void client.invalidateQueries({ queryKey: ["chats"] });
-        void client.invalidateQueries({ queryKey: ["artifact"] });
-        void client.invalidateQueries({ queryKey: ["comparisons"] });
+      const connection = new WebSocket(url);
+      socket = connection;
+      const reconcile = createWorkspaceEventReconciler(client);
+      connection.onopen = () => {
+        if (!closed && socket === connection) setConnected(true);
       };
-      socket.onclose = () => {
+      connection.onmessage = (event) => {
+        if (!closed && socket === connection) void reconcile(event.data);
+      };
+      connection.onclose = () => {
+        if (closed || socket !== connection) return;
+        socket = null;
         setConnected(false);
-        if (!closed) timer = setTimeout(connect, 5000);
+        timer = setTimeout(connect, 5000);
       };
-      socket.onerror = () => socket?.close();
+      connection.onerror = () => connection.close();
     }
     connect();
     return () => {

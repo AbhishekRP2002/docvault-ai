@@ -233,8 +233,10 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
         and node.args
         and isinstance(node.args[0], ast.Constant)
     ]
-    # Diagnostics adds a separate table; neither upgrade nor downgrade may recreate the ledger.
-    assert table_operations == ["job_stage_runs", "job_stage_runs"]
+    # Additive tables must not recreate the ledger in either migration direction.
+    assert sorted(table_operations) == [
+        "job_stage_runs", "job_stage_runs", "workspace_revisions", "workspace_revisions"
+    ]
     assert 'postgresql_with={"m": 32, "ef_construction": 200}' in generated_source
     command.upgrade(generated_config, "head")
     with isolated_database.engine.connect() as connection:

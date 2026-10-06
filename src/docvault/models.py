@@ -2,7 +2,18 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Computed, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,6 +28,19 @@ def new_id() -> str:
 def now() -> datetime:
     """Return the current timezone-aware UTC time for persisted timestamps."""
     return datetime.now(UTC)
+
+
+class WorkspaceRevision(Base):
+    """One committed change per transaction; the zero row identifies this database epoch."""
+
+    __tablename__ = "workspace_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "(transaction_id = 0) = (epoch IS NOT NULL)", name="workspace_revision_epoch"
+        ),
+    )
+    transaction_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    epoch: Mapped[str | None] = mapped_column(String(36))
 
 
 class Document(Base):

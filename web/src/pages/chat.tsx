@@ -31,6 +31,7 @@ import {
   X,
 } from "lucide-react";
 import { api, generate } from "@/lib/api";
+import { deferStreamingMessageRefetch } from "@/lib/workspace-events";
 import type { Chat, Citation, Message, VaultDocument } from "@/lib/types";
 import { cn, errorMessage } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -72,8 +73,9 @@ export function ChatPage({
   const sources = chatId ? selectedChat?.version_ids || [] : draftSources;
   const messages = useQuery({
     queryKey: ["messages", chatId],
-    queryFn: () => api<{ items: Message[] }>(`/v1/chats/${chatId}/messages`),
-    enabled: !!chatId,
+    queryFn: ({ signal }) =>
+      api<{ items: Message[] }>(`/v1/chats/${chatId}/messages`, { signal }),
+    enabled: !!chatId && !streaming,
     refetchInterval: (q) =>
       !streaming && q.state.data?.items.some(activeStatus) ? 1500 : false,
   });
@@ -117,6 +119,7 @@ export function ChatPage({
     let id = chatId;
     let started = false;
     let responseId: string | null = null;
+    let releaseMessageRefetch: (() => void) | undefined;
     const controller = new AbortController();
     stream.current = controller;
     try {
@@ -136,7 +139,8 @@ export function ChatPage({
         client.setQueryData(["messages", id], { items: [] });
         onSelectChat(id);
       }
-      await client.cancelQueries({ queryKey: ["messages", id] });
+      releaseMessageRefetch = deferStreamingMessageRefetch(client, id);
+      await client.cancelQueries({ queryKey: ["messages", id], exact: true });
       const targetId = id;
       await generate(
         `/v1/chats/${id}/messages${retryId ? `/${retryId}/retry` : ""}`,
@@ -181,6 +185,7 @@ export function ChatPage({
         if (!started && content) runtime.thread.composer.setText(content);
       }
     } finally {
+      releaseMessageRefetch?.();
       if (stream.current === controller) {
         setStreaming(false);
         stream.current = null;

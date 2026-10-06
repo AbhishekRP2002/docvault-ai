@@ -63,10 +63,9 @@ def count_metric(key: str, duration_ms: float = 0):
 
 
 def notify_change():
-    """Publish a Redis revision hint; tolerate outages because clients reconcile from SQL."""
+    """Publish a best-effort wake-up hint; committed SQL revisions own reconciliation."""
     try:
         client = redis_client()
-        revision = client.incr("docvault:revision")
-        client.publish("docvault:events", json.dumps({"type": "update", "revision": revision}))
+        client.publish("docvault:events", json.dumps({"type": "update"}))
     except RedisError:
         pass  # WebSocket snapshots also reconcile from the database.
