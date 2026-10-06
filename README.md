@@ -20,6 +20,8 @@ Install Docker with Compose (Docker Desktop includes both). No local Python or N
 
 The script builds and starts all services, applies database migrations, and waits for them to be ready. The first build and parser model downloads can take several minutes. If `.env` is missing, the script creates it and asks you to set the key before running it again.
 
+Dependency downloads during Docker builds use a 300-second HTTP timeout. If a download still times out, retry `./start_up.sh` once the connection is stable.
+
 - Workspace: <http://127.0.0.1:5173>
 - API documentation: <http://127.0.0.1:8000/docs>
 
