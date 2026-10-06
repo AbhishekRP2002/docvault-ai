@@ -3,7 +3,7 @@ import type {
   ExternalStoreAdapter,
   ThreadMessageLike,
 } from "@assistant-ui/react";
-import type { Message } from "./types";
+import type { AgentToolTrace, Message } from "./types";
 
 // SQL/SSE messages remain authoritative. The UI runtime keeps citation and
 // suggestion data on the message rather than treating it as model content.
@@ -12,7 +12,28 @@ export function toAssistantMessage(message: Message): ThreadMessageLike {
     id: message.id,
     role: message.role,
     createdAt: new Date(message.created_at),
-    content: message.content,
+    content: message.role === "assistant" && message.agent_trace?.length
+      ? [
+          ...message.agent_trace.filter((trace) => !trace.server_evidence_reuse).map((trace) => ({
+            type: "tool-call" as const,
+            toolCallId: trace.tool_call_id,
+            toolName: trace.tool,
+            args: trace.arguments,
+            argsText: JSON.stringify(trace.arguments),
+            ...((trace.execution_status === "completed" || trace.execution_status === "failed" ||
+                 ["ok", "error"].includes(trace.status)) && {
+              result: {
+                status: trace.execution_status || trace.status,
+                source_count: trace.evidence_ids?.length || 0,
+                documents: trace.document_references?.map((item) => item.filename || item.title).filter(Boolean) || [],
+                error: typeof trace.error === "string" ? trace.error : trace.error?.message,
+              },
+              isError: trace.execution_status === "failed" || trace.status === "error",
+            }),
+          })),
+          { type: "text" as const, text: message.content },
+        ]
+      : message.content,
     ...(message.role === "assistant" && {
       status:
         message.status === "pending" || message.status === "streaming"
@@ -86,4 +107,12 @@ export function mergeVisibleMessage(
   return index === -1
     ? [...items, incoming]
     : items.map((message, i) => (i === index ? incoming : message));
+}
+
+/** Replace progress for one invocation without duplicating its lifecycle in history. */
+export function mergeToolProgress(items: Message[], messageId: string, trace: AgentToolTrace): Message[] {
+  return items.map((message) => message.id === messageId ? {
+    ...message,
+    agent_trace: [...(message.agent_trace || []).filter((item) => item.tool_call_id !== trace.tool_call_id), trace],
+  } : message);
 }

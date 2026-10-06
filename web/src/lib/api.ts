@@ -1,4 +1,4 @@
-import type { Message, VaultDocument } from "./types";
+import type { AgentToolTrace, Message, VaultDocument } from "./types";
 export const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 export function apiUrl(path: string) {
   return `${API_URL}${path}`;
@@ -23,6 +23,7 @@ export async function api<T>(
 export type GenerationEvent =
   | { type: "message.started"; message: Message; user_message?: Message }
   | { type: "answer.delta"; text: string }
+  | { type: "tool.updated"; message_id: string; trace: AgentToolTrace }
   | { type: "answer.completed" | "message.failed"; message: Message };
 /** Decode SSE independently of network chunk boundaries, including CRLF framing. */
 export function parseSSE(buffer: string): {

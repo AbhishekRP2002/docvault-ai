@@ -12,9 +12,12 @@ import {
   createChatAdapter,
   mergeVisibleMessage,
   toAssistantMessage,
+  mergeToolProgress,
 } from "./assistant-runtime";
 import type { Message } from "./types";
+import { AssistantToolTimeline } from "../components/assistant-ui/elements/document-tool-activity";
 import { AssistantThinking } from "../components/assistant-ui/elements/thinking-indicator";
+import { AssistantMessageContent, ChatSuggestions } from "../pages/chat";
 
 function stored(id: string, changes: Partial<Message> = {}): Message {
   return {
@@ -47,6 +50,7 @@ function stored(id: string, changes: Partial<Message> = {}): Message {
 // a browser, DOM shim, provider call, or additional test dependency.
 function harness(
   overrides: Partial<Parameters<typeof createChatAdapter>[0]> = {},
+  productionContent = false,
 ) {
   const sends: string[] = [];
   const retries: string[] = [];
@@ -84,10 +88,11 @@ function harness(
           <ThreadPrimitive.Messages>
             {({ message }) => (
               <MessagePrimitive.Root data-message={message.id}>
-                <AssistantThinking />
-                {message.content
-                  .map((part) => (part.type === "text" ? part.text : ""))
-                  .join("")}
+                {productionContent ? <AssistantMessageContent onCitation={() => {}} /> : <>
+                  <AssistantThinking />
+                  <AssistantToolTimeline defaultOpen />
+                  <MessagePrimitive.Parts components={{ tools: { Fallback: () => null } }} />
+                </>}
               </MessagePrimitive.Root>
             )}
           </ThreadPrimitive.Messages>
@@ -95,6 +100,8 @@ function harness(
             <ComposerPrimitive.Input aria-label="Question" />
             <ComposerPrimitive.Send>Send</ComposerPrimitive.Send>
           </ComposerPrimitive.Root>
+          <ChatSuggestions message={overrides.messages?.at(-1) || stored("answer-1")}
+            busy={overrides.isRunning || false} />
         </ThreadPrimitive.Root>
       </AssistantRuntimeProvider>
     );
@@ -200,15 +207,15 @@ describe("assistant-ui ThinkingIndicator", () => {
 });
 
 describe("assistant-ui callbacks", () => {
-  test("composer sends text exactly once and clears its draft", async () => {
-    const { runtime, sends } = harness();
+  test.each(["new", "existing"])("%s conversation sends text exactly once and clears its draft", async (conversation) => {
+    const { runtime, sends } = harness(conversation === "new" ? { messages: [] } : {});
     runtime.thread.composer.setText("Explain cancellation");
     await runtime.thread.composer.send();
     await runtime.thread.composer.send();
     expect(sends).toEqual(["Explain cancellation"]);
     expect(runtime.thread.composer.getState().text).toBe("");
   });
-  test("source/loading gate blocks sending but retains typed text", async () => {
+  test("loading gate blocks sending but retains typed text", async () => {
     const { runtime, sends } = harness({ isSendDisabled: true });
     runtime.thread.composer.setText("Explain cancellation");
     await runtime.thread.composer.send();
@@ -245,5 +252,99 @@ describe("assistant-ui callbacks", () => {
     expect(runtime.thread.getState().messages[0]!.status).toEqual({
       type: "running",
     });
+  });
+});
+
+describe("persisted tool progress", () => {
+  test("upserts one invocation and renders native tool parts before answer text", () => {
+    const trace = {
+      tool_call_id: "call-1", tool: "retrieve_relevant_chunks",
+      arguments: { query: "Annual price" }, status: "running", execution_status: "running" as const,
+      observed_at: "2026-10-05T00:00:00Z",
+    };
+    const items = mergeToolProgress([stored("answer-1", { status: "streaming", content: "" })], "answer-1", trace);
+    const converted = toAssistantMessage(items[0]!);
+    expect(Array.isArray(converted.content)).toBe(true);
+    const parts = converted.content as readonly { type: string; result?: unknown }[];
+    expect(parts[0]?.type).toBe("tool-call");
+    expect(parts[0]?.result).toBeUndefined();
+    const completed = mergeToolProgress(items, "answer-1", {
+      ...trace, status: "ok", execution_status: "completed", evidence_ids: ["c1"],
+    });
+    expect(completed[0]?.agent_trace).toHaveLength(1);
+    const final = toAssistantMessage(completed[0]!);
+    expect((final.content as readonly { result?: unknown }[])[0]?.result).toMatchObject({ source_count: 1, status: "completed" });
+    expect(mergeToolProgress(items, "other-chat-message", trace)).toEqual(items);
+  });
+  test("real assistant-ui renderer shows tool state and safe details without raw output", () => {
+    const trace = {
+      tool_call_id: "call-1", tool: "get_selected_document_overviews", arguments: { cursor: null },
+      status: "ok", execution_status: "completed" as const, observed_at: "2026-10-05T00:00:00Z",
+      evidence_ids: ["c1"], document_references: [{ filename: "policy.txt" }],
+    };
+    const { html } = harness({ messages: [stored("answer-1", { agent_trace: [trace] })] });
+    expect(html).toContain("Read document overviews");
+    expect(html).toContain("Complete");
+    expect(html).toContain("USD 1200");
+  });
+  test("failed tools remain distinct from successful tools in a failed answer", () => {
+    const trace = { tool_call_id: "call-1", tool: "search_documents", arguments: { query: "pricing" }, status: "error", execution_status: "failed" as const, observed_at: "2026-10-05T00:00:00Z", error: { code: "source_missing", message: "Source unavailable.", retryable: false } };
+    const converted = toAssistantMessage(stored("answer-1", { status: "failed", agent_trace: [trace] }));
+    expect((converted.content as readonly { isError?: boolean }[])[0]?.isError).toBe(true);
+    expect((converted.content as readonly { result?: unknown }[])[0]?.result).toMatchObject({ error: "Source unavailable." });
+    expect(harness({ messages: [stored("answer-1", { status: "failed", agent_trace: [trace] })] }).html).toContain("Stopped");
+  });
+});
+
+describe("production assistant content and follow-ups", () => {
+  test("empty pending answers with no tool calls never render a stray zero", () => {
+    // React previously rendered this guard as 0 when both fields were empty.
+    const message = stored("answer-1", { status: "pending", content: "", agent_trace: [] });
+    expect(renderToString(<div>{(message.content || message.agent_trace?.length) && <span>Answer</span>}</div>)).toBe("<div>0</div>");
+    const { html } = harness({ messages: [message], isRunning: true }, true);
+    expect(html).toContain("Thinking with your documents");
+    expect(html).not.toMatch(/>0</);
+    expect(html).not.toContain('data-slot="tool-timeline"');
+  });
+  test("a completed answer displays canonical follow-ups through Suggestion primitives", () => {
+    expect(harness().html).toContain("When can I cancel?");
+    const message = stored("answer-1", { suggestions: ["First?", "Second?", "Third?", "Fourth?"] });
+    const { html } = harness({ messages: [message] });
+    for (const question of message.suggestions.slice(0, 3)) expect(html).toContain(question);
+    expect(html).not.toContain("Fourth?");
+  });
+  test("empty, streaming and terminal-failure suggestions are hidden", () => {
+    for (const status of ["pending", "streaming", "failed", "cancelled"] as const) {
+      expect(harness({ messages: [stored("answer-1", { status })] }).html).not.toContain("When can I cancel?");
+    }
+    expect(harness({ isRunning: true }).html).not.toContain("When can I cancel?");
+    expect(harness({ messages: [stored("answer-1", { suggestions: [] })] }).html).not.toContain("Suggested follow-up questions");
+  });
+  test("production tool activity renders one timeline without duplicate per-part cards", () => {
+    const trace = { tool_call_id: "call-1", tool: "retrieve_relevant_chunks", arguments: { query: "Price" }, status: "ok", execution_status: "completed" as const, observed_at: "2026-10-05T00:00:00Z" };
+    const { html } = harness({ messages: [stored("answer-1", { agent_trace: [trace] })] }, true);
+    expect(html.match(/data-slot="tool-timeline"/g)).toHaveLength(1);
+    expect(html).toContain("1 tool call completed");
+    expect(html).not.toContain('data-slot="tool-call"'); // collapsed by default
+    expect(html).toContain("USD 1200");
+  });
+  test("parallel calls keep distinct rows and their individual completion states", () => {
+    const base = { tool: "retrieve_relevant_chunks", arguments: { query: "Price" }, observed_at: "2026-10-05T00:00:00Z" };
+    const traces = [
+      { ...base, tool_call_id: "call-1", status: "ok", execution_status: "completed" as const, evidence_ids: ["c1"] },
+      { ...base, tool_call_id: "call-2", status: "running", execution_status: "running" as const },
+    ];
+    const { html } = harness({ messages: [stored("answer-1", { content: "", status: "streaming", agent_trace: traces })], isRunning: true });
+    expect(html.match(/data-slot="tool-call"/g)).toHaveLength(2);
+    expect(html).toContain('aria-label="Searched selected documents: Complete"');
+    expect(html).toContain('aria-label="Searched selected documents: In progress"');
+  });
+  test("native tool parts retain receipts without copying raw results into UI state", () => {
+    const trace = { tool_call_id: "call-1", tool: "retrieve_relevant_chunks", arguments: { query: "Price" }, status: "ok", execution_status: "completed" as const, observed_at: "2026-10-05T00:00:00Z", evidence_ids: ["c1"], document_references: [{ filename: "policy.txt" }], raw_output: "PRIVATE DOCUMENT PASSAGE" };
+    const converted = toAssistantMessage(stored("answer-1", { agent_trace: [trace] }));
+    // Full SQL message metadata is kept separately; rendered native parts contain only receipts.
+    expect(JSON.stringify(converted.content)).not.toContain(trace.raw_output);
+    expect(JSON.stringify(converted.content)).toContain("policy.txt");
+    expect(JSON.stringify(converted.content)).toContain('"source_count":1');
   });
 });

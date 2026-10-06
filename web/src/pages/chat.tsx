@@ -9,6 +9,7 @@ import {
 import {
   createChatAdapter,
   mergeVisibleMessage,
+  mergeToolProgress,
 } from "@/lib/assistant-runtime";
 import {
   MarkdownText,
@@ -16,6 +17,7 @@ import {
 } from "@/components/assistant-ui/elements/markdown-text";
 import { ScrollToBottom } from "@/components/assistant-ui/elements/scroll-to-bottom";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
+import { AssistantToolTimeline } from "@/components/assistant-ui/elements/document-tool-activity";
 import { AssistantThinking } from "@/components/assistant-ui/elements/thinking-indicator";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -39,7 +41,8 @@ import { ErrorState, LoadingRows } from "@/components/common";
 import { DocumentPicker } from "@/components/document-picker";
 import { CitationDrawer, citationLocation } from "@/components/citation-drawer";
 const EMPTY_MESSAGES: Message[] = [];
-const TEXT_COMPONENTS = { Text: MarkdownText };
+// ToolTimeline owns tool rendering; silence per-part tools to avoid duplicate steps.
+const MESSAGE_COMPONENTS = { Text: MarkdownText, tools: { Fallback: () => null } };
 const activeStatus = (m: Message) =>
   m.role === "assistant" && ["pending", "streaming"].includes(m.status);
 export function ChatPage({
@@ -85,7 +88,6 @@ export function ChatPage({
     streaming ||
     !!active ||
     (!!chatId && (messages.isPending || !!messages.error));
-  const readyDocuments = documents.filter((d) => d.status === "ready");
   useEffect(() => {
     setDraftSources(initialVersions);
   }, [initialVersions]);
@@ -110,8 +112,7 @@ export function ChatPage({
     if (
       stream.current ||
       busy ||
-      (!retryId && !content?.trim()) ||
-      !sources.length
+      (!retryId && !content?.trim())
     )
       return;
     setError(null);
@@ -151,6 +152,11 @@ export function ChatPage({
             responseId = event.message.id;
             if (event.user_message) mergeMessage(targetId, event.user_message);
             mergeMessage(targetId, event.message);
+          }
+          if (event.type === "tool.updated") {
+            client.setQueryData<{ items: Message[] }>(["messages", targetId], (old) => ({
+              items: mergeToolProgress(old?.items || [], event.message_id, event.trace),
+            }));
           }
           if (event.type === "answer.delta" && responseId)
             client.setQueryData<{ items: Message[] }>(
@@ -220,7 +226,7 @@ export function ChatPage({
       messages: items,
       isRunning: streaming || !!active,
       isLoading: !!chatId && messages.isPending,
-      isSendDisabled: !sources.length || busy,
+      isSendDisabled: busy,
       onSend: (text) => run(text),
       onRetry: (id) => run(undefined, id),
       onCancel: cancel,
@@ -326,40 +332,12 @@ export function ChatPage({
                     </TooltipIconButton>
                   </div>
                 )}
-                {!busy &&
-                  latestAssistant?.status === "complete" &&
-                  !!latestAssistant.suggestions?.length && (
-                    <div className="mb-3 flex flex-wrap gap-2">
-                      {latestAssistant.suggestions
-                        .slice(0, 3)
-                        .map((suggestion) => (
-                          <ThreadPrimitive.Suggestion
-                            key={suggestion}
-                            prompt={suggestion}
-                            send
-                            disabled={!sources.length}
-                            asChild
-                          >
-                            <Button
-                              className="h-auto max-w-full whitespace-normal rounded-full px-3 py-2 text-left text-xs font-normal"
-                              variant="outline"
-                            >
-                              {suggestion}
-                              <ArrowUp className="size-3 shrink-0 rotate-45 text-muted-foreground" />
-                            </Button>
-                          </ThreadPrimitive.Suggestion>
-                        ))}
-                    </div>
-                  )}
+                <ChatSuggestions message={latestAssistant} busy={busy} />
                 <ComposerPrimitive.Root className="rounded-xl border bg-card p-3.5 shadow-[0_2px_6px_rgb(0_0_0/3%)] transition-shadow focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-primary/8">
                   <ComposerPrimitive.Input
                     aria-label="Your question"
                     maxLength={4000}
-                    placeholder={
-                      sources.length
-                        ? "Ask anything about your documents…"
-                        : "Select files to start a run…"
-                    }
+                    placeholder="Ask a question…"
                     submitMode="enter"
                     maxRows={8}
                     className="min-h-[60px] w-full resize-none rounded-md border-0 bg-transparent p-1 text-[14px] outline-none placeholder:text-muted-foreground disabled:opacity-50"
@@ -435,11 +413,6 @@ export function ChatPage({
           }}
         />
         <CitationDrawer citation={citation} onClose={() => setCitation(null)} />
-        {readyDocuments.length === 0 && !documents.length && (
-          <span className="sr-only">
-            Upload a document in the library before chatting.
-          </span>
-        )}
       </div>
     </AssistantRuntimeProvider>
   );
@@ -451,6 +424,34 @@ function PendingMessage() {
     </MessagePrimitive.Root>
   );
 }
+
+/** Render canonical follow-ups only after the latest answer has completed. */
+export function ChatSuggestions({ message, busy }: {
+  message?: Message; busy: boolean;
+}) {
+  if (busy || message?.status !== "complete" || !message.suggestions?.length) return null;
+  return <div className="mb-3 flex flex-wrap gap-2" aria-label="Suggested follow-up questions">
+    {message.suggestions.slice(0, 3).map((suggestion) => (
+      <ThreadPrimitive.Suggestion key={suggestion} prompt={suggestion} send asChild>
+        <Button className="h-auto max-w-full whitespace-normal rounded-full px-3 py-2 text-left text-xs font-normal" variant="outline">
+          {suggestion}<ArrowUp className="size-3 shrink-0 rotate-45 text-muted-foreground" />
+        </Button>
+      </ThreadPrimitive.Suggestion>
+    ))}
+  </div>;
+}
+
+/** Empty message parts render nothing; avoid numeric JSX guards leaking a stray zero. */
+export function AssistantMessageContent({ onCitation }: { onCitation: (citation: Citation) => void }) {
+  return <div className="text-sm">
+    <AssistantThinking className="py-3 text-xs" />
+    <AssistantToolTimeline />
+    <MarkdownCitationContext.Provider value={onCitation}>
+      <MessagePrimitive.Parts components={MESSAGE_COMPONENTS} />
+    </MarkdownCitationContext.Provider>
+  </div>;
+}
+
 function MessageView({
   message,
   retryable,
@@ -484,14 +485,7 @@ function MessageView({
           </div>
           <span className="text-xs font-semibold">DocVault</span>
         </div>
-        <div className="text-sm">
-          <AssistantThinking className="py-3 text-xs" />
-          {message.content && (
-            <MarkdownCitationContext.Provider value={onCitation}>
-              <MessagePrimitive.Parts components={TEXT_COMPONENTS} />
-            </MarkdownCitationContext.Provider>
-          )}
-        </div>
+        <AssistantMessageContent onCitation={onCitation} />
         {message.error && (
           <div className="mt-3">
             <ErrorState error={message.error} />

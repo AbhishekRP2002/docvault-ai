@@ -140,11 +140,11 @@ export function DocumentPicker({
             Cancel
           </Button>
           <Button
-            disabled={saving || !draft.length}
+            disabled={saving}
             onClick={() => onSave(draft)}
           >
             <Check />
-            {saving ? "Saving…" : "Use selected documents"}
+            {saving ? "Saving…" : draft.length ? "Use selected documents" : "Continue without files"}
           </Button>
         </div>
       </DialogContent>

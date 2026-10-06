@@ -68,6 +68,18 @@ export interface Citation {
   };
   quote: string;
 }
+export interface AgentToolTrace {
+  tool_call_id: string;
+  tool: string;
+  arguments: Record<string, string | number | boolean | null | string[]>;
+  status: string;
+  execution_status?: "pending" | "running" | "completed" | "failed";
+  observed_at: string;
+  evidence_ids?: string[];
+  document_references?: { filename?: string; title?: string }[];
+  error?: string | { code?: string; message: string; retryable?: boolean };
+  server_evidence_reuse?: boolean;
+}
 export interface Message {
   id: string;
   chat_id: string;
@@ -75,6 +87,7 @@ export interface Message {
   status: "pending" | "streaming" | "complete" | "failed" | "cancelled";
   content: string;
   suggestions: string[];
+  agent_trace?: AgentToolTrace[];
   citations: Citation[];
   error: string | null;
   created_at: string;
