@@ -63,8 +63,8 @@ class ChatModelSettings(EnvironmentSettings):
     openrouter_context_tokens: int = Field(default=128000, gt=0)
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_chat_temperature: float | None = None
-    # Retain the existing round-control name for the single chat tool loop.
-    agent_max_tool_rounds: int = Field(default=6, gt=0)
+    # Maximum tool-use rounds within one answer; each round may call multiple tools.
+    agent_max_tool_rounds: int = Field(default=20, gt=0)
 
     def chat_model_configuration(self) -> GenerationModelConfig:
         """Build the shared, immutable model configuration for chat tool calls and answers."""

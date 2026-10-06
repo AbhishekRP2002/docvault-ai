@@ -55,7 +55,7 @@ def test_chat_settings_own_the_existing_tool_round_environment_name(
     clean_model_environment, monkeypatch
 ):
     """Moving tool selection into chat retains the existing bounded-round control."""
-    assert ChatModelSettings(_env_file=None).agent_max_tool_rounds == 6
+    assert ChatModelSettings(_env_file=None).agent_max_tool_rounds == 20
     monkeypatch.setenv("AGENT_MAX_TOOL_ROUNDS", "4")
     assert ChatModelSettings(_env_file=None).agent_max_tool_rounds == 4
     assert LLMSettings(_env_file=None).agent_max_tool_rounds == 4

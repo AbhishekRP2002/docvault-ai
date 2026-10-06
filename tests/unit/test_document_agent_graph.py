@@ -493,6 +493,37 @@ async def test_round_limit_and_duplicate_native_call_ids_stop_before_final_gener
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requested_rounds", [20, 21])
+async def test_default_limit_allows_twenty_tool_batches_then_requires_an_answer(requested_rounds):
+    """Allow multiple calls per round, finish after 20 rounds, and reject a 21st batch."""
+    llm = ScriptedAgent(
+        [
+            [
+                call("retrieve_relevant_chunks", identifier=f"round-{index}-call-{item}")
+                for item in range(2)
+            ]
+            for index in range(requested_rounds)
+        ]
+        + [[]]
+    )
+    runtime = ScriptedRuntime(
+        {
+            "retrieve_relevant_chunks": ToolExecutionResult(
+                content={"status": "ok"}, scope="document", evidence=[source()]
+            )
+        }
+    )
+    if requested_rounds == 20:
+        result, _, _ = await run(llm, runtime)
+        assert result[0].outcome == "answered" and llm.generations == 1
+    else:
+        with pytest.raises(ValueError, match="tool limit"):
+            await run(llm, runtime)
+        assert llm.generations == 0
+    assert len(runtime.calls) == 40
+
+
+@pytest.mark.asyncio
 async def test_deadline_cancels_active_read_without_emitting_completed_answer():
     llm = ScriptedAgent([[call("retrieve_relevant_chunks")], []])
     runtime = ScriptedRuntime(

@@ -1,6 +1,6 @@
-.PHONY: up stop logs status
+.PHONY: start stop logs status
 
-up:
+start:
 	./start_up.sh
 
 stop:

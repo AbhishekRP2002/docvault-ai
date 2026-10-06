@@ -37,7 +37,7 @@ line-length = 100
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pyright]
-include = ["src", "tests", "migrations", "scripts"]
+include = ["src", "tests", "migrations"]
 extraPaths = ["src"]
 venvPath = "."
 venv = ".venv"

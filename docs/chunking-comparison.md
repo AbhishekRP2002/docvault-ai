@@ -52,4 +52,4 @@ Use the same parsed document, tokenizer, 750-token budget, context prefixes, and
 
 Measure source coverage, final embedding-input size, sentence-boundary errors, table/header retention, citation mapping, chunk count, chunking time, and peak memory. Then compare retrieval and cited answers on the same labeled questions. No content loss, oversized input, lost table context, or invented precise PDF offsets is acceptable. Select a replacement only after reviewing those results; do not infer quality from a package name or vendor speed claim.
 
-PDF tuning and conversion measurements are recorded in [progress.md](progress.md). `scripts/benchmark_parser.py` measures initialization, conversion, and chunking separately without indexing, changing stored documents, or calling an LLM.
+PDF tuning and conversion measurements are recorded in [progress.md](progress.md). The optional benchmark runner has been removed; its historical measurements and limitations remain in the ledger.

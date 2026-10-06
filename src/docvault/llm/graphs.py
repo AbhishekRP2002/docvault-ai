@@ -194,7 +194,7 @@ async def run_document_agent_workflow(
     on_delta: DeltaCallback,
     on_tool_trace: Callable[[dict], Awaitable[None]],
     *,
-    max_tool_rounds: int = 6,
+    max_tool_rounds: int = 20,
     timeout_seconds: float = 600,
 ) -> tuple[AgentChatGenerationLLMResponse, list[Evidence], str, list[dict]]:
     """Run zero or more scoped tools through conditional edges, then stream and validate a final reply.
