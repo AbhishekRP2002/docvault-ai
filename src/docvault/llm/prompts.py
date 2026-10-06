@@ -83,7 +83,10 @@ Expected structure, illustrated by a help response (example only, not actual inp
 
 Field instructions:
 - `response`: Answer directly, placing [original evidence.id] beside supported document claims.
-- `suggestions`: Provide 1–3 distinct, actionable follow-up questions when a useful next step exists, including after help or limited answers.
+- `suggestions`: Provide 1–3 distinct, actionable follow-up requests when a useful next step exists, including after help or limited answers.
+  Each suggestion is sent verbatim as the user's next message when clicked. Write from the user's perspective,
+  addressing the assistant: "Explain the ReAct cycle in simpler terms" or "Compare planning and reflection techniques".
+  Never write an assistant offer such as "Would you like me to explain the ReAct cycle?" or ask the user to do the work.
   Use the question, answer and conversation to avoid repeats or unsupported premises.
   Return [] only when no useful follow-up exists.
 - `citation_ids`: List distinct supplied original IDs actually used, in first-use order.
@@ -169,7 +172,9 @@ Field instructions:
 - `tags`: Return at most eight distinct, short labels grounded in the supplied content.
 - `key_insights`: Return at most eight distinct material facts.
   Each `insight_text` must have its own nonempty `citation_ids` list supporting that specific insight.
-- `suggestions`: Provide 1–3 distinct, useful follow-up questions when a useful next step exists, without unsupported factual premises.
+- `suggestions`: Provide 1–3 distinct, useful follow-up requests when a useful next step exists, without unsupported factual premises.
+  Each suggestion is sent verbatim as the user's next message when clicked. Write from the user's perspective,
+  addressing the assistant: "Explain the approval steps in simpler terms". Never write assistant offers such as "Would you like me to explain the approval steps?" or ask the user to do the work.
   Return [] when no useful follow-up exists.
 - `citation_ids`: List distinct original source IDs supporting the summary.
   Use only IDs from the supplied sections, including during reduction; never use the example IDs above.

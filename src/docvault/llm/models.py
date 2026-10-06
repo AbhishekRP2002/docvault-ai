@@ -32,7 +32,7 @@ class ChatGenerationLLMResponse(StrictModel):
     )
     suggestions: list[str] = Field(
         max_length=3,
-        description="Provide one to three distinct useful next questions based on this answer and conversation; empty only when no useful follow-up exists. Never assume unsupported facts.",
+        description="One to three distinct useful requests written from the user's perspective and addressed to the assistant. Each is sent verbatim as the next user message when clicked, e.g. 'Explain the ReAct cycle in simpler terms'. Never write assistant offers like 'Would you like me to...?' or assume unsupported facts. Empty only when no useful follow-up exists.",
     )
     citation_ids: list[str] = Field(
         description="Distinct original evidence IDs actually used in response, in first-use order."
@@ -76,7 +76,8 @@ class InsightsGenerationLLMResponse(StrictModel):
         max_length=8, description="Up to eight individually cited document insights."
     )
     suggestions: list[str] = Field(
-        max_length=3, description="Zero to three useful follow-up questions about the document."
+        max_length=3,
+        description="Zero to three useful document follow-ups written as user requests addressed to the assistant, ready to send verbatim, e.g. 'Explain the approval steps'. Never write assistant offers like 'Would you like me to...?'.",
     )
     citation_ids: list[str] = Field(
         min_length=1,
