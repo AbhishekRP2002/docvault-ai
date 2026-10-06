@@ -95,16 +95,17 @@ def test_storage_readback_cleanup_and_capacity(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "revision,index_valid,extension,ready",
+    "revision,index_valid,overview_valid,extension,ready",
     [
-        ("head", True, True, True),
-        ("old", True, True, False),
-        ("head", False, True, False),
-        ("head", True, False, False),
+        ("head", True, True, True, True),
+        ("old", True, True, True, False),
+        ("head", False, True, True, False),
+        ("head", True, True, False, False),
+        ("head", True, False, True, False),
     ],
 )
 def test_database_requires_current_revision_and_valid_indexes(
-    monkeypatch, revision, index_valid, extension, ready
+    monkeypatch, revision, index_valid, overview_valid, extension, ready
 ):
     """Connectivity is distinct from migration and hybrid-index readiness."""
 
@@ -113,7 +114,12 @@ def test_database_requires_current_revision_and_valid_indexes(
         if "version_num" in sql:
             return SimpleNamespace(scalars=lambda: [revision])
         return SimpleNamespace(
-            all=lambda: [("ix_chunks_embedding_hnsw", index_valid), ("ix_chunks_search", True)]
+            all=lambda: [
+                ("ix_chunks_embedding_hnsw", index_valid),
+                ("ix_chunks_search", True),
+                ("ix_document_overviews_embedding_hnsw", overview_valid),
+                ("ix_document_overviews_search", True),
+            ]
         )
 
     connection = SimpleNamespace(execute=execute, scalar=lambda statement: extension)
@@ -127,7 +133,7 @@ def test_database_requires_current_revision_and_valid_indexes(
     assert checks["database"].ready
     assert all(item.ready for item in checks.values()) is ready
     assert checks["schema"].ready is (revision == "head")
-    assert checks["vector_index"].ready is (index_valid and extension)
+    assert checks["vector_index"].ready is (index_valid and overview_valid and extension)
 
 
 def test_database_outage_is_safe_and_explicit(monkeypatch):

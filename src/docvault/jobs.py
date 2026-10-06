@@ -39,7 +39,7 @@ def _resolve_job_document_ids(db: Session, job: Job) -> list[str]:
     """Resolve the source document IDs a job needs for locking and deletion checks."""
     if job.kind == "cleanup":
         return [job.resource_id]
-    if job.kind in {"ingest", "insights"}:
+    if job.kind in {"ingest", "insights", "overview_index"}:
         version = db.get(Version, job.resource_id)
         if not version:
             raise SourceDeleted("The document version no longer exists.")

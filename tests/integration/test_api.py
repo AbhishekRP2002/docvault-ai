@@ -25,8 +25,8 @@ from docvault import cache, integrations
 from docvault.config import get_settings
 from docvault.db import Base, get_engine, session
 from docvault.integrations import create_llm_client
-from docvault.llm.models import ChatGenerationLLMResponse
 from docvault.models import Chat, Chunk, Document, Idempotency, Job, LLMCall, Message, Version, now
+from docvault.tools.models import AgentChatGenerationLLMResponse, AgentToolCall, ChatAgentTurn
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +55,10 @@ class MemoryRedis:
 
 
 class FakeLLM:
+    async def resolve_model_context_tokens(self, task):
+        """Expose deterministic advertised model capacity without external metadata calls."""
+        return self.generation_model(task).context_tokens
+
     def generation_model(self, task):
         return get_settings().generation_model(task)
 
@@ -68,34 +72,82 @@ class FakeLLM:
         return [[1.0] + [0.0] * 1535 for _ in inputs]
 
     async def generate_structured_response(self, schema, messages, *, task):
-        payload = json.loads(messages[-1]["content"])
-        return schema(
-            standalone_question=payload["question"],
-            needs_clarification=False,
-            clarification_question="",
-        )
+        """Provide deterministic conversation memory; document-analysis tests use their own provider."""
+        assert task == "conversation_summary"
+        return schema(summary="Retained document references and unresolved user questions.")
 
-    async def stream_structured_answer(self, messages, on_delta):
-        payload = json.loads(messages[-1]["content"])
+    async def stream_chat_turn(self, messages, tools, on_delta, *, evidence_ids):
+        """A single native chat method requests retrieval, then streams the grounded answer."""
+        payload = read_native_chat_payload(messages)
+        if not payload["observations"]:
+            arguments = {"query": payload["question"]}
+            call = AgentToolCall(
+                id="retrieval-call", name="retrieve_relevant_chunks", arguments=arguments
+            )
+            return ChatAgentTurn(
+                assistant_message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {"name": call.name, "arguments": json.dumps(arguments)},
+                        }
+                    ],
+                },
+                tool_calls=[call],
+            )
         self.calls.append(payload)
         self.started.set()
-        if self.block:
-            if not await asyncio.to_thread(self.release.wait, 10):
-                raise TimeoutError("Test provider release was not signalled.")
+        if self.block and not await asyncio.to_thread(self.release.wait, 10):
+            raise TimeoutError("Test provider release was not signalled.")
         evidence = payload["evidence"][0]
         response = f"{evidence['text']} [{evidence['id']}]"
         split = len(response) // 2
         await on_delta(response[:split])
         await on_delta(response[split:])
-        return ChatGenerationLLMResponse(
+        answer = AgentChatGenerationLLMResponse(
             response=response,
             suggestions=["What is the renewal date?"],
             citation_ids=[evidence["id"]],
             outcome="answered",
+            response_kind="document_answer",
+        )
+        return ChatAgentTurn(
+            assistant_message={"role": "assistant", "content": answer.model_dump_json()},
+            tool_calls=[],
+            answer=answer,
         )
 
     async def close(self):
         pass
+
+
+def read_native_chat_payload(messages):
+    """Read bounded original evidence and fresh receipts from the actual native transcript."""
+    payload = json.loads(next(item["content"] for item in messages if item["role"] == "user"))
+    payload["observations"] = []
+    evidence = {item["id"]: item for item in payload.get("evidence", [])}
+    names = {
+        call["id"]: call["function"]["name"]
+        for message in messages
+        for call in message.get("tool_calls", [])
+    }
+    for message in messages:
+        if message["role"] != "tool":
+            continue
+        content = json.loads(message["content"])
+        payload["observations"].append({"tool": names[message["tool_call_id"]], "content": content})
+        passages = list(content.get("passages", [])) + list(content.get("supporting_snippets", []))
+        passages.extend(
+            source
+            for item in content.get("items", [])
+            for source in item.get("supporting_snippets", [])
+        )
+        evidence.update({item["id"]: item for item in passages})
+    payload["evidence"] = list(evidence.values())
+    return payload
 
 
 @pytest.fixture(scope="module")
@@ -674,3 +726,75 @@ def test_artifact_reuse_tracks_only_the_selected_task_configuration(api, monkeyp
             artifacts[0].options["generation_fingerprint"]
             != artifacts[1].options["generation_fingerprint"]
         )
+
+
+def test_chat_summary_checkpoint_persists_without_rewriting_messages(api, monkeypatch):
+    """Compact older history through the API and reuse its SQL checkpoint on the next turn."""
+    from docvault.llm.models import ConversationSummaryLLMResponse
+
+    source = ready_source()
+    chat_id = create_chat(api, [source])
+    assert ask(api, chat_id).json()["status"] == "complete"
+    with session() as db, db.begin():
+        for index in range(3):
+            user = Message(
+                chat_id=chat_id,
+                role="user",
+                content="old context " * 2500,
+                version_ids=[source.version],
+            )
+            db.add(user)
+            db.flush()
+            db.add(
+                Message(
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=f"Historical answer {index}.",
+                    parent_id=user.id,
+                    version_ids=[source.version],
+                )
+            )
+    with session() as db:
+        original = {
+            m.id: m.content for m in db.scalars(select(Message).where(Message.chat_id == chat_id))
+        }
+    summaries = []
+    original_generation = api.llm.generate_structured_response
+
+    async def actual_capacity(task):
+        """Advertise a repeatable context small enough to exercise the actual threshold."""
+        return 16000
+
+    async def summarize(schema, messages, *, task):
+        """Generate strict memory for older turns while preserving other fake-provider tasks."""
+        if task == "conversation_summary":
+            summaries.append(json.loads(messages[-1]["content"]))
+            return ConversationSummaryLLMResponse(
+                summary="The user discussed earlier document questions."
+            )
+        return await original_generation(schema, messages, task=task)
+
+    monkeypatch.setattr(api.llm, "resolve_model_context_tokens", actual_capacity)
+    monkeypatch.setattr(api.llm, "generate_structured_response", summarize)
+    response = ask(api, chat_id, key="compact-history")
+    assert response.status_code == 200 and response.json()["status"] == "complete", response.text
+    assert len(summaries) == 1
+    with session() as db:
+        checkpoint = require_persisted_row(db, Chat, chat_id).context_summary
+        assert checkpoint is not None and checkpoint["summary"]["summary"]
+        assert set(checkpoint["compacted_message_ids"]).issubset(original)
+        assert len(checkpoint["compacted_message_ids"]) == len(original) - 2
+        assert {
+            m.id: m.content for m in db.scalars(select(Message).where(Message.id.in_(original)))
+        } == original
+    repeated = ask(api, chat_id, key="compact-history")
+    assert repeated.json()["id"] == response.json()["id"] and len(summaries) == 1
+    followup = ask(api, chat_id, question="Repeat the deadline.", key="after-compaction")
+    assert followup.json()["status"] == "complete", followup.text
+    assert len(summaries) == 1
+    conversation = api.llm.calls[-1]["conversation"]
+    assert "conversation_memory" in conversation[0]["content"]
+    assert "not document evidence" in conversation[0]["content"]
+    assert len(conversation) == 5
+    assert conversation[1]["content"] == "old context " * 2500
+    assert conversation[2]["content"] == "Historical answer 2."

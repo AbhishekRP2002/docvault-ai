@@ -9,12 +9,12 @@ class InputModel(BaseModel):
 
 class ChatCreate(InputModel):
     title: str = Field(default="New chat", min_length=1, max_length=200)
-    version_ids: list[str] = Field(min_length=1)
+    version_ids: list[str] = Field(default_factory=list)
 
 
 class ChatUpdate(InputModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
-    version_ids: list[str] | None = Field(default=None, min_length=1)
+    version_ids: list[str] | None = None
 
 
 class MessageCreate(InputModel):

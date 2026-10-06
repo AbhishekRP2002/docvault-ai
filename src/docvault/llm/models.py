@@ -31,7 +31,8 @@ class ChatGenerationLLMResponse(StrictModel):
         description="Direct user-facing answer or limitation, with exact evidence IDs beside claims.",
     )
     suggestions: list[str] = Field(
-        max_length=3, description="Zero to three useful follow-up questions for the user."
+        max_length=3,
+        description="Provide one to three distinct useful next questions based on this answer and conversation; empty only when no useful follow-up exists. Never assume unsupported facts.",
     )
     citation_ids: list[str] = Field(
         description="Distinct original evidence IDs actually used in response, in first-use order."
@@ -41,20 +42,12 @@ class ChatGenerationLLMResponse(StrictModel):
     )
 
 
-class InputQueryRewriteLLMResponse(StrictModel):
-    """Standalone input query and the clarification needed for ambiguous conversation references."""
+class ConversationSummaryLLMResponse(StrictModel):
+    """Condensed conversation memory for reference resolution, never document grounding."""
 
-    # Decide ambiguity before generating a rewritten query; ordering guides output,
-    # but only evaluation can establish whether a model makes the correct decision.
-    needs_clarification: bool = Field(
-        description="True when a missing or ambiguous reference prevents reliable retrieval, including a singular reference with multiple plausible subjects."
-    )
-    clarification_question: str = Field(
-        description="One concise question resolving the ambiguity when needed; otherwise empty."
-    )
-    standalone_question: str = Field(
+    summary: str = Field(
         min_length=1,
-        description="Latest question with clear references resolved; never broaden an ambiguous singular reference to multiple entities.",
+        description="Concise older-turn memory: user intent, named subjects, unresolved references and pending tasks; prior answers are unverified conversation, not evidence.",
     )
 
 

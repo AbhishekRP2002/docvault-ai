@@ -1,5 +1,6 @@
 """Check task prompt/schema contracts, not the quality of model-generated answers."""
 
+import json
 import re
 
 import pytest
@@ -13,27 +14,28 @@ from docvault.llm.models import (
     ChatGenerationLLMResponse,
     CitedKeyInsight,
     ComparisonDimensionLLMResponse,
-    InputQueryRewriteLLMResponse,
+    ConversationSummaryLLMResponse,
     InsightsGenerationLLMResponse,
 )
+from docvault.tools.models import AgentChatGenerationLLMResponse
 
 TASK_CONTRACTS: tuple[tuple[LLMTask, type[BaseModel], str, tuple[str, ...]], ...] = (
     (
-        "input_query_rewrite",
-        InputQueryRewriteLLMResponse,
-        "INPUT_QUERY_REWRITE_SYSTEM_PROMPT",
-        ("question", "conversation"),
+        "conversation_summary",
+        ConversationSummaryLLMResponse,
+        "CONVERSATION_SUMMARY_SYSTEM_PROMPT",
+        ("older_turns", "prior_memory"),
     ),
     (
         "chat",
-        ChatGenerationLLMResponse,
+        AgentChatGenerationLLMResponse,
         "CHAT_SYSTEM_PROMPT",
-        ("question", "standalone_question", "conversation", "evidence"),
+        ("question", "conversation", "selected_documents", "evidence"),
     ),
     (
         "summary",
         InsightsGenerationLLMResponse,
-        "SUMMARY_SYSTEM_PROMPT",
+        "DOCUMENT_SUMMARY_SYSTEM_PROMPT",
         ("sections", "length", "tone", "focus_areas"),
     ),
     (
@@ -104,7 +106,7 @@ def test_summary_prompt_formats_length_without_changing_the_citation_contract(le
     assert all(field in prompt for field in InsightsGenerationLLMResponse.model_fields)
 
 
-def test_input_query_rewrite_prompt_edits_invalidate_only_that_task(monkeypatch):
+def test_chat_prompt_edits_invalidate_only_chat(monkeypatch):
     """Prevent cached resolutions from surviving edits to input-query rewrite instructions."""
     configuration = GenerationModelConfig(
         model="test/contract", context_tokens=12000, max_output_tokens=1000
@@ -115,27 +117,64 @@ def test_input_query_rewrite_prompt_edits_invalidate_only_that_task(monkeypatch)
     }
     monkeypatch.setattr(
         prompts,
-        "INPUT_QUERY_REWRITE_SYSTEM_PROMPT",
-        prompts.INPUT_QUERY_REWRITE_SYSTEM_PROMPT + "\nResolve references conservatively.",
+        "CHAT_SYSTEM_PROMPT",
+        prompts.CHAT_SYSTEM_PROMPT + "\nResolve references conservatively.",
     )
     for task, fingerprint in original.items():
         changed = calculate_json_fingerprint(prompts.build_generation_identity(configuration, task))
-        assert (changed != fingerprint) == (task == "input_query_rewrite")
+        assert (changed != fingerprint) == (task == "chat")
 
 
-def test_input_query_rewrite_schema_places_ambiguity_decision_before_resolved_query():
-    """Keep decision-first generation guidance; property order does not guarantee model accuracy."""
-    expected_order = ["needs_clarification", "clarification_question", "standalone_question"]
-    response_format = type_to_response_format_param(InputQueryRewriteLLMResponse)
-    assert isinstance(response_format, dict)
-    specification = response_format.get("json_schema")
-    assert isinstance(specification, dict)
-    schema = specification.get("schema")
-    assert isinstance(schema, dict)
-    properties = schema.get("properties")
-    assert isinstance(properties, dict)
-    assert list(properties) == expected_order
-    assert schema.get("required") == expected_order
+def test_chat_has_one_prompt_and_uses_native_tools_with_its_actual_final_schema():
+    """The same identity owns tool choice and answer output, without unused chat/selector prompts."""
+    assert not hasattr(prompts, "AGENT_SYSTEM_PROMPT")
+    assert not hasattr(prompts, "AGENT_ANSWER_SYSTEM_PROMPT")
+    assert not hasattr(prompts, "INPUT_QUERY_REWRITE_SYSTEM_PROMPT")
+    identity = prompts.build_generation_identity(
+        GenerationModelConfig(model="test/chat", context_tokens=10000, max_output_tokens=1000),
+        "chat",
+    )
+    assert identity["prompt"] == prompts.CHAT_SYSTEM_PROMPT
+    assert identity["schema"] == AgentChatGenerationLLMResponse.model_json_schema()
+    assert len(identity["tool_definitions"]) == 6
+    assert "final_prompt" not in identity
+
+
+@pytest.mark.parametrize("task,schema,prompt_name,input_fields", TASK_CONTRACTS)
+def test_prompts_keep_explicit_role_or_task_input_and_output_sections(
+    task, schema, prompt_name, input_fields
+):
+    """Keep the existing readable prompt format across all active model tasks."""
+    prompt = getattr(prompts, prompt_name)
+    purpose_section = "# Role" if task in {"chat", "summary"} else "# Task"
+    output_section = "# Output\n" if task in {"chat", "summary"} else "# Output fields"
+    assert all(
+        section in prompt for section in (purpose_section, "# Input and boundaries", output_section)
+    )
+
+
+def test_chat_output_example_matches_the_actual_response_schema_and_streaming_order():
+    """Validate the documented final-output example against the active Pydantic contract."""
+    match = re.search(r"```json\n(.*?)\n```", prompts.CHAT_SYSTEM_PROMPT, re.DOTALL)
+    assert match is not None
+    example = json.loads(match.group(1))
+    response = AgentChatGenerationLLMResponse.model_validate(example)
+    assert list(example) == list(AgentChatGenerationLLMResponse.model_fields)
+    assert response.response_kind == "assistant_help"
+    assert response.citation_ids == []
+
+
+@pytest.mark.parametrize("length", ["short", "medium", "long"])
+def test_document_summary_output_example_formats_without_corrupting_json(length):
+    """Word-target substitution preserves nested JSON matching the actual insights schema."""
+    prompt = prompts.build_summary_system_prompt(length)
+    match = re.search(r"```json\n(.*?)\n```", prompt, re.DOTALL)
+    assert match is not None
+    example = json.loads(match.group(1))
+    response = InsightsGenerationLLMResponse.model_validate(example)
+    assert list(example) == list(InsightsGenerationLLMResponse.model_fields)
+    assert response.key_insights[0].citation_ids == response.citation_ids
+    assert not hasattr(prompts, "SUMMARY_SYSTEM_PROMPT")
 
 
 @pytest.mark.parametrize(
@@ -147,10 +186,12 @@ def test_input_query_rewrite_schema_places_ambiguity_decision_before_resolved_qu
             citation_ids=[],
             outcome="insufficient_evidence",
         ),
-        InputQueryRewriteLLMResponse(
-            standalone_question="What is its notice period?",
-            needs_clarification=True,
-            clarification_question="Do you mean Acme or Atlas?",
+        AgentChatGenerationLLMResponse(
+            response="Do you mean Acme or Atlas?",
+            suggestions=[],
+            citation_ids=[],
+            outcome="clarification_needed",
+            response_kind="clarification",
         ),
         ComparisonDimensionLLMResponse(
             finding_text="The supplied sections do not specify a notice period.",

@@ -103,6 +103,10 @@ def seed_version(content="Payment is due in 30 days.", document_id=None, number=
 
 
 class FakeLLM:
+    async def resolve_model_context_tokens(self, task):
+        """Use the fixture model's deterministic capacity without issuing metadata requests."""
+        return self.generation_model(task).context_tokens
+
     def generation_model(self, task):
         return GenerationModelConfig(
             model=f"test/{task}", context_tokens=128000, max_output_tokens=4096

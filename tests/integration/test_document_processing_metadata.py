@@ -202,8 +202,11 @@ def test_manual_retry_clears_displayed_timing_until_new_attempt_starts(api):
     assert response.status_code == 202, response.text
     with session() as db:
         persisted = require_persisted_row(db, Job, source.job)
-        assert persisted.started_at == START  # Existing retry behavior retains this timestamp.
+        assert persisted.started_at is None and persisted.finished_at is None
         assert persisted.attempts == 0
+        previous = db.scalar(select(JobAttempt).where(JobAttempt.job_id == source.job))
+        assert previous is not None
+        assert previous.started_at == START and previous.finished_at == FINISH
     assert get_metadata(api, source.document)["processing"] == {
         "run_id": source.job,
         "status": "queued",

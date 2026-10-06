@@ -24,7 +24,17 @@ from docvault.llm.insights import generate_document_comparison, generate_documen
 from docvault.llm.models import Evidence
 from docvault.llm.prompts import build_generation_identity
 from docvault.llm.provider import token_count
-from docvault.models import Artifact, Chunk, Document, Job, JobAttempt, JobStageRun, Version, now
+from docvault.models import (
+    Artifact,
+    Chunk,
+    Document,
+    DocumentOverview,
+    Job,
+    JobAttempt,
+    JobStageRun,
+    Version,
+    now,
+)
 from docvault.parsing import CHUNK_TOKENS, ParsedDocument, parse_document_file
 from docvault.retrieval import create_cited_evidence_record
 from docvault.stage_tracking import processing_stage
@@ -372,6 +382,11 @@ async def _create_document_insights(job_id: str, token: int, version_id: str) ->
     with session() as db:
         version = require_version(db, version_id, ready=True)
         if version.insight_status == "ready" and version.insights is not None:
+            with session() as index_db, index_db.begin():
+                from docvault.tools.discovery import enqueue_document_overview_index
+
+                job_checkpoint(index_db, job_id, token)
+                enqueue_document_overview_index(index_db, version_id)
             return
     _update_processing_stage(job_id, token, "insights")
     with session() as db:
@@ -391,6 +406,55 @@ async def _create_document_insights(job_id: str, token: int, version_id: str) ->
         job_checkpoint(db, job_id, token)
         version = require_version(db, version_id, ready=True)
         version.insights, version.insight_status, version.insight_error = data, "ready", None
+        from docvault.tools.discovery import enqueue_document_overview_index
+
+        enqueue_document_overview_index(db, version_id)
+
+
+async def _index_document_overview(job_id: str, token: int, version_id: str) -> None:
+    """Embed a reusable derived overview under a fenced job without altering ready sources."""
+    from docvault.tools.discovery import (
+        build_document_overview_identity,
+        overview_matches_current_insights,
+    )
+
+    with session() as db, db.begin():
+        job_checkpoint(db, job_id, token, "overview_embedding")
+        version = require_version(db, version_id, ready=True)
+        if version.insight_status != "ready" or not version.insights:
+            raise AppError(
+                409, "insights_not_ready", "Document insights are not ready for discovery."
+            )
+        document = require_document(db, version.document_id)
+        identity = build_document_overview_identity(document.title, version)
+        existing = db.get(DocumentOverview, version_id)
+        if existing is not None and overview_matches_current_insights(existing, identity):
+            return
+    llm = create_llm_client(version_id)
+    try:
+        vector = (await llm.embed_texts([identity["text"]]))[0]
+    finally:
+        await llm.close()
+    with session() as db, db.begin():
+        job_checkpoint(db, job_id, token)
+        version = require_version(db, version_id, ready=True)
+        document = require_document(db, version.document_id)
+        if build_document_overview_identity(document.title, version) != identity:
+            raise AppError(
+                409,
+                "overview_changed",
+                "Document insights changed while discovery was indexing.",
+                retryable=True,
+            )
+        overview = db.get(DocumentOverview, version_id)
+        if overview is None:
+            overview = DocumentOverview(version_id=version_id, **identity, embedding=vector)
+            db.add(overview)
+        else:
+            for field, value in identity.items():
+                setattr(overview, field, value)
+            overview.embedding = vector
+            overview.created_at = now()
 
 
 async def _generate_requested_artifact(job_id: str, token: int, artifact_id: str) -> None:
@@ -527,6 +591,7 @@ def _cleanup_deleted_document(job_id: str, token: int, document_id: str) -> None
             get_parsed_document_path(version.id).unlink(missing_ok=True)
             get_parsed_document_path(version.id).with_suffix(".fingerprint").unlink(missing_ok=True)
             db.execute(delete(Chunk).where(Chunk.version_id == version.id))
+            db.execute(delete(DocumentOverview).where(DocumentOverview.version_id == version.id))
             version.status, version.insights, version.insight_status = "deleted", None, "cancelled"
 
 
@@ -554,6 +619,9 @@ async def process_document_job(job_id: str, token: int) -> None:
     elif kind == "insights":
         with processing_stage("generating"):
             await _create_document_insights(job_id, token, resource_id)
+    elif kind == "overview_index":
+        with processing_stage("overview_embedding"):
+            await _index_document_overview(job_id, token, resource_id)
     elif kind in {"summary", "comparison"}:
         with processing_stage("generating"):
             await _generate_requested_artifact(job_id, token, resource_id)

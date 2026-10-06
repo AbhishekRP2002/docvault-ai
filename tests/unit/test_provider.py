@@ -5,11 +5,10 @@ import json
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from docvault.llm.config import LLMSettings
-from docvault.llm.models import ChatGenerationLLMResponse, InputQueryRewriteLLMResponse
-from docvault.llm.provider import ContextLimitError, OpenRouterLLM, ProviderError
+from docvault.llm.models import ComparisonDimensionLLMResponse, InsightsGenerationLLMResponse
+from docvault.llm.provider import OpenRouterLLM, ProviderError
 
 PROVIDER_USAGE = {
     "prompt_tokens": 42,
@@ -103,7 +102,13 @@ def completion(content=None, *, refusal=None, finish="stop", usage=None):
 )
 async def test_sdk_stream_emits_stable_unicode_text_before_completion(value):
     raw = json.dumps(
-        {"suggestions": ["Next?"], "response": value, "citation_ids": ["c1"], "outcome": "answered"}
+        {
+            "suggestions": ["Next?"],
+            "response": value,
+            "citation_ids": ["c1"],
+            "outcome": "answered",
+            "response_kind": "document_answer",
+        }
     )
     stream = ResponseStream(
         list(raw),
@@ -125,7 +130,9 @@ async def test_sdk_stream_emits_stable_unicode_text_before_completion(value):
 
     llm = create_provider(handler, record)
     try:
-        answer = await llm.stream_structured_answer([], delta)
+        turn = await llm.stream_chat_turn([], [], delta, evidence_ids=["c1"])
+        assert turn.answer is not None
+        answer = turn.answer
     finally:
         await llm.close()
     assert "".join(deltas) == answer.response == value
@@ -156,7 +163,7 @@ async def test_sdk_stream_emits_stable_unicode_text_before_completion(value):
         (
             "stop",
             None,
-            '{"response":"Invalid","suggestions":[],"citation_ids":[],"outcome":"oops"}',
+            '{"response":"Invalid","suggestions":[],"citation_ids":[],"outcome":"oops","response_kind":"assistant_help"}',
         ),
     ],
 )
@@ -176,7 +183,7 @@ async def test_sdk_stream_rejects_incomplete_refused_or_invalid_output(finish, r
     llm = create_provider(handler, record)
     try:
         with pytest.raises(ProviderError):
-            await llm.stream_structured_answer([], delta)
+            await llm.stream_chat_turn([], [], delta, evidence_ids=["c1"])
     finally:
         await llm.close()
     assert stream.closed
@@ -204,7 +211,7 @@ async def test_stream_cancellation_closes_connection_and_records_failure():
     llm = create_provider(handler, record)
     try:
         with pytest.raises(asyncio.CancelledError):
-            await llm.stream_structured_answer([], delta)
+            await llm.stream_chat_turn([], [], delta, evidence_ids=["c1"])
     finally:
         await llm.close()
     assert stream.closed and usage[0]["status"] == "failed"
@@ -223,9 +230,9 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
             json=completion(
                 json.dumps(
                     {
-                        "standalone_question": "When is payment due?",
-                        "needs_clarification": False,
-                        "clarification_question": "",
+                        "finding_text": "Payment is due in 30 days.",
+                        "status": "found",
+                        "citation_ids": ["c1"],
                     }
                 )
             ),
@@ -237,23 +244,23 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
     llm = create_provider(
         handler,
         record,
-        openrouter_input_query_rewrite_model="test/input_query_rewrite",
-        openrouter_input_query_rewrite_max_output_tokens=512,
-        openrouter_input_query_rewrite_temperature=0,
+        openrouter_comparison_model="test/comparison",
+        openrouter_comparison_max_output_tokens=512,
+        openrouter_comparison_temperature=0,
     )
     try:
         parsed = await llm.generate_structured_response(
-            InputQueryRewriteLLMResponse, [], task="input_query_rewrite"
+            ComparisonDimensionLLMResponse, [], task="comparison"
         )
     finally:
         await llm.close()
-    assert isinstance(parsed, InputQueryRewriteLLMResponse)
-    assert parsed.standalone_question == "When is payment due?"
-    assert parsed.clarification_question == ""
+    assert isinstance(parsed, ComparisonDimensionLLMResponse)
+    assert parsed.finding_text == "Payment is due in 30 days."
+    assert parsed.status == "found"
     request = requested[0]
-    assert request["model"] == "test/input_query_rewrite" and request["max_tokens"] == 512
+    assert request["model"] == "test/comparison" and request["max_tokens"] == 512
     assert request["temperature"] == 0
-    assert request["response_format"]["json_schema"]["name"] == "InputQueryRewriteLLMResponse"
+    assert request["response_format"]["json_schema"]["name"] == "ComparisonDimensionLLMResponse"
     assert usage[0]["status"] == "succeeded" and usage[0]["cost_usd"] == 0.003
     assert usage[0]["input_tokens"] == 42 and usage[0]["output_tokens"] == 12
     assert usage[0]["cached_tokens"] == 8 and usage[0]["request_id"] == "req1"
@@ -265,7 +272,7 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
     [
         ("not JSON", None, "stop"),
         (
-            '{"response":"Hi","suggestions":["1","2","3","4"],"citation_ids":[],"outcome":"answered"}',
+            '{"summary":"Hi","category":"General","tags":[],"key_insights":[],"suggestions":["1","2","3","4"],"citation_ids":["c1"]}',
             None,
             "stop",
         ),
@@ -286,7 +293,9 @@ async def test_sdk_parse_failures_preserve_provider_usage(content, refusal, fini
     llm = create_provider(handler, record)
     try:
         with pytest.raises(ProviderError):
-            await llm.generate_structured_response(ChatGenerationLLMResponse, [], task="summary")
+            await llm.generate_structured_response(
+                InsightsGenerationLLMResponse, [], task="summary"
+            )
     finally:
         await llm.close()
     assert usage[0]["status"] == "failed" and usage[0]["cost_usd"] == 0.003
@@ -295,35 +304,50 @@ async def test_sdk_parse_failures_preserve_provider_usage(content, refusal, fini
 
 
 @pytest.mark.asyncio
-async def test_task_context_overflow_fails_before_http_without_truncation():
+async def test_configured_context_does_not_reject_or_truncate_generation_input():
+    requested = []
+
     def handler(request):
-        pytest.fail("Context rejection must happen before a provider request")
+        """Accept complete input beyond a configured planning fallback as the real provider may."""
+        requested.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json=completion(
+                json.dumps(
+                    {
+                        "finding_text": "The document describes payment.",
+                        "status": "found",
+                        "citation_ids": ["c1"],
+                    }
+                )
+            ),
+        )
 
     llm = create_provider(
         handler,
-        openrouter_input_query_rewrite_context_tokens=1000,
-        openrouter_input_query_rewrite_max_output_tokens=200,
+        openrouter_comparison_context_tokens=1000,
+        openrouter_comparison_max_output_tokens=200,
     )
     try:
-        with pytest.raises(ContextLimitError):
-            await llm.generate_structured_response(
-                InputQueryRewriteLLMResponse,
-                [{"role": "user", "content": "evidence " * 1000}],
-                task="input_query_rewrite",
-            )
+        await llm.generate_structured_response(
+            ComparisonDimensionLLMResponse,
+            [{"role": "user", "content": "evidence " * 1000}],
+            task="comparison",
+        )
     finally:
         await llm.close()
+    assert requested[0]["messages"][0]["content"] == "evidence " * 1000
 
 
-def test_invalid_task_capacity_is_rejected_before_client_creation():
+async def test_configured_context_reservation_does_not_override_actual_provider_capacity():
     settings = LLMSettings(
         _env_file=None,
         openrouter_api_key="test-key",
         openrouter_comparison_context_tokens=1000,
         openrouter_comparison_max_output_tokens=1000,
     )
-    with pytest.raises(ValidationError, match="context must exceed"):
-        OpenRouterLLM(settings)
+    llm = OpenRouterLLM(settings)
+    await llm.close()
 
 
 @pytest.mark.asyncio
@@ -339,7 +363,7 @@ async def test_empty_stream_fails_as_provider_error():
     llm = create_provider(handler)
     try:
         with pytest.raises(ProviderError, match="no completion"):
-            await llm.stream_structured_answer([], delta)
+            await llm.stream_chat_turn([], [], delta, evidence_ids=["c1"])
     finally:
         await llm.close()
 
@@ -371,7 +395,13 @@ async def test_usage_distinguishes_unreported_values_from_reported_zero(
 ):
     """Preserve unknown accounting and true zero charges through full JSON and final SSE parsing."""
     content = json.dumps(
-        {"response": "Answer", "suggestions": [], "citation_ids": ["c1"], "outcome": "answered"}
+        {
+            "response": "Answer",
+            "suggestions": [],
+            "citation_ids": ["c1"],
+            "outcome": "answered",
+            "response_kind": "document_answer",
+        }
     )
     usage = []
 
@@ -383,7 +413,9 @@ async def test_usage_distinguishes_unreported_values_from_reported_zero(
                 stream=ResponseStream([content], usage=provider_usage),
                 headers={"content-type": "text/event-stream"},
             )
-        response = completion(content)
+        response = completion(
+            json.dumps({"finding_text": "Answer", "status": "found", "citation_ids": ["c1"]})
+        )
         response["usage"] = provider_usage
         return httpx.Response(200, json=response)
 
@@ -398,9 +430,11 @@ async def test_usage_distinguishes_unreported_values_from_reported_zero(
     llm = create_provider(handler, record)
     try:
         if streaming:
-            await llm.stream_structured_answer([], delta)
+            await llm.stream_chat_turn([], [], delta, evidence_ids=["c1"])
         else:
-            await llm.generate_structured_response(ChatGenerationLLMResponse, [], task="chat")
+            await llm.generate_structured_response(
+                ComparisonDimensionLLMResponse, [], task="comparison"
+            )
     finally:
         await llm.close()
     assert len(usage) == 1 and usage[0]["status"] == "succeeded"
@@ -500,3 +534,88 @@ async def test_invalid_embedding_dimensions_preserve_reported_usage():
     assert len(usage) == 1 and usage[0]["status"] == "failed"
     assert usage[0]["input_tokens"] == 3 and usage[0]["output_tokens"] == 0
     assert usage[0]["cost_usd"] == 0.0001
+
+
+@pytest.mark.asyncio
+async def test_model_context_metadata_is_cached_across_tasks_and_clients(monkeypatch):
+    """Actual model capacity overrides a configured fallback without recording generation usage."""
+    monkeypatch.setattr("docvault.llm.provider.MODEL_CONTEXT_CACHE", {})
+    requested, usage = [], []
+
+    def handler(request):
+        """Return the official OpenRouter context metadata via the installed SDK models API."""
+        requested.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "test/actual-model",
+                        "created": 0,
+                        "object": "model",
+                        "owned_by": "test",
+                        "context_length": 1000000,
+                    }
+                ]
+            },
+        )
+
+    async def record(value):
+        """Fail if unbilled metadata requests are recorded as generation usage."""
+        usage.append(value)
+
+    options = {
+        "openrouter_chat_model": "test/actual-model",
+        "openrouter_comparison_model": "test/actual-model",
+        "openrouter_context_tokens": 1000,
+        "openrouter_comparison_context_tokens": 1000,
+    }
+    first, second = (
+        create_provider(handler, record, **options),
+        create_provider(handler, record, **options),
+    )
+    try:
+        assert await first.resolve_model_context_tokens("chat") == 1000000
+        assert await first.resolve_model_context_tokens("comparison") == 1000000
+        assert await second.resolve_model_context_tokens("chat") == 1000000
+    finally:
+        await first.close()
+        await second.close()
+    assert requested == ["/v1/models"] and usage == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(503),
+        httpx.Response(200, json={"data": []}),
+        httpx.Response(200, json={"data": None}),
+        httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "test/actual-model",
+                        "created": 0,
+                        "object": "model",
+                        "owned_by": "test",
+                        "context_length": True,
+                    }
+                ]
+            },
+        ),
+    ],
+)
+async def test_model_metadata_unavailable_uses_configured_planning_fallback(monkeypatch, response):
+    """Unavailable/invalid metadata does not create a local generation input rejection."""
+    monkeypatch.setattr("docvault.llm.provider.MODEL_CONTEXT_CACHE", {})
+    llm = create_provider(
+        lambda request: response,
+        openrouter_chat_model="test/actual-model",
+        openrouter_context_tokens=7777,
+    )
+    try:
+        assert await llm.resolve_model_context_tokens("chat") == 7777
+    finally:
+        await llm.close()

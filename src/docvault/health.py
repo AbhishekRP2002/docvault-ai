@@ -276,20 +276,26 @@ def probe_database() -> dict[str, DependencyCheck]:
                     connection.execute(
                         text("""
                     SELECT c.relname, i.indisvalid AND i.indisready
-                        AND ((c.relname='ix_chunks_embedding_hnsw' AND a.amname='hnsw')
-                        OR (c.relname='ix_chunks_search' AND a.amname='gin'))
+                        AND ((c.relname IN ('ix_chunks_embedding_hnsw', 'ix_document_overviews_embedding_hnsw') AND a.amname='hnsw')
+                        OR (c.relname IN ('ix_chunks_search', 'ix_document_overviews_search') AND a.amname='gin'))
                     FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
                     JOIN pg_class t ON t.oid=i.indrelid
                     JOIN pg_namespace n ON n.oid=t.relnamespace
                     JOIN pg_am a ON a.oid=c.relam
-                    WHERE t.relname='chunks' AND n.nspname=current_schema()
-                    AND c.relname IN ('ix_chunks_embedding_hnsw', 'ix_chunks_search')
+                    WHERE t.relname IN ('chunks', 'document_overviews') AND n.nspname=current_schema()
+                    AND c.relname IN ('ix_chunks_embedding_hnsw', 'ix_chunks_search',
+                                     'ix_document_overviews_embedding_hnsw', 'ix_document_overviews_search')
                 """)
                     ).all()
                 )
                 valid = extension and all(
                     indexes.get(name, False)
-                    for name in ("ix_chunks_embedding_hnsw", "ix_chunks_search")
+                    for name in (
+                        "ix_chunks_embedding_hnsw",
+                        "ix_chunks_search",
+                        "ix_document_overviews_embedding_hnsw",
+                        "ix_document_overviews_search",
+                    )
                 )
                 failed["vector_index"] = DependencyCheck(
                     ready=valid,

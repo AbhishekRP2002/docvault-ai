@@ -154,7 +154,7 @@ def _replace_ledger_table_rename(context, container, old_name: str, new_name: st
 def _creates_hnsw_index(container) -> bool:
     """Find HNSW creation among the table operation groups emitted by autogeneration."""
     return any(
-        (isinstance(item, ops.CreateIndexOp) and item.index_name == "ix_chunks_embedding_hnsw")
+        (isinstance(item, ops.CreateIndexOp) and item.kw.get("postgresql_using") == "hnsw")
         or (isinstance(item, ops.OpContainer) and _creates_hnsw_index(item))
         for item in container.ops
     )
@@ -174,3 +174,20 @@ def prepare_generated_migration(context, revision, directives) -> None:
             upgrade, downgrade = _workspace_revision_operations()
             script.upgrade_ops.ops.extend(upgrade)
             script.downgrade_ops.ops[:0] = downgrade
+        if any(
+            isinstance(item, ops.CreateTableOp) and item.table_name == "document_overviews"
+            for item in script.upgrade_ops.ops
+        ):
+            for name, event in (
+                ("workspace_change_insert_delete", "INSERT OR DELETE"),
+                ("workspace_change_update", "UPDATE"),
+            ):
+                condition = " WHEN (OLD IS DISTINCT FROM NEW)" if event == "UPDATE" else ""
+                script.upgrade_ops.ops.append(
+                    ops.ExecuteSQLOp(
+                        f"CREATE TRIGGER {name} AFTER {event} ON document_overviews FOR EACH ROW{condition} EXECUTE FUNCTION record_workspace_change()"
+                    )
+                )
+                script.downgrade_ops.ops.insert(
+                    0, ops.ExecuteSQLOp(f"DROP TRIGGER {name} ON document_overviews")
+                )

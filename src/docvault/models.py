@@ -108,6 +108,35 @@ class Chunk(Base):
     )
 
 
+class DocumentOverview(Base):
+    """Searchable generated overview for discovery; source chunks remain citation authority."""
+
+    __tablename__ = "document_overviews"
+    __table_args__ = (
+        Index("ix_document_overviews_search", "search", postgresql_using="gin"),
+        Index(
+            "ix_document_overviews_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 32, "ef_construction": 200},
+        ),
+    )
+    version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id", ondelete="CASCADE"), primary_key=True
+    )
+    title: Mapped[str] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    generation_fingerprint: Mapped[str] = mapped_column(String(64))
+    embedding_model: Mapped[str] = mapped_column(String(128))
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
+    search: Mapped[str] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('english'::regconfig, text)", persisted=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -167,6 +196,7 @@ class Artifact(Base):
 
 class Chat(Base):
     __tablename__ = "chats"
+    context_summary: Mapped[dict | None] = mapped_column(JSONB)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str]
     version_ids: Mapped[list[str]] = mapped_column(JSONB)
@@ -199,6 +229,9 @@ class Message(Base):
     error: Mapped[str | None]
     outcome: Mapped[str | None]
     rewritten_query: Mapped[str | None]
+    agent_trace: Mapped[list[dict]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

@@ -3,6 +3,7 @@
 import json
 
 from docvault.llm.config import LLMTask
+from docvault.llm.evidence import build_llm_evidence_record
 from docvault.llm.graphs import InvalidCitationError, validate_citation_ids
 from docvault.llm.models import (
     ComparisonDimensionLLMResponse,
@@ -23,12 +24,10 @@ def _serialize_prompt_payload(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _calculate_section_token_capacity(llm: OpenRouterLLM, task: LLMTask) -> int:
-    """Return section capacity after prompt/output reservations, rejecting unusable contexts."""
-    # Capacity follows the configured provider model. This is not a file limit or
-    # a product evidence budget. Leave room for instructions, schema and output.
+async def _calculate_section_token_capacity(llm: OpenRouterLLM, task: LLMTask) -> int:
+    """Plan analysis batches using actual model metadata with prompt/output reservations."""
     configuration = llm.generation_model(task)
-    usable = configuration.context_tokens - configuration.max_output_tokens - 2048
+    usable = await llm.resolve_model_context_tokens(task) - configuration.max_output_tokens - 2048
     if usable < 512:
         raise ContextLimitError("The configured model context is too small for document analysis.")
     return usable
@@ -64,7 +63,7 @@ def _build_source_records(chunks: list[Evidence]) -> list[dict]:
             "citation_ids": [item.id],
             "filename": item.filename,
             "version_id": item.version_id,
-            "location": item.location,
+            "location": build_llm_evidence_record(item)["location"],
         }
         for item in chunks
     ]
@@ -106,7 +105,7 @@ async def generate_document_summary(
         raise ValueError("Provide up to five nonempty focus areas.")
     records, capacity = (
         _build_source_records(chunks),
-        _calculate_section_token_capacity(llm, "summary"),
+        await _calculate_section_token_capacity(llm, "summary"),
     )
     instructions = build_summary_system_prompt(length)
     while True:
@@ -188,7 +187,7 @@ async def _extract_comparison_dimension(
         )
     records, capacity = (
         _build_source_records(chunks),
-        _calculate_section_token_capacity(llm, "comparison"),
+        await _calculate_section_token_capacity(llm, "comparison"),
     )
     while True:
         groups = _group_records_by_token_capacity(records, capacity)

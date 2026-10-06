@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from docvault.llm.config import GenerationModelConfig, LLMSettings, LLMTask
 from docvault.llm.graphs import (
     InvalidCitationError,
-    run_document_chat_workflow,
 )
 from docvault.llm.insights import (
     generate_document_comparison,
@@ -19,11 +18,9 @@ from docvault.llm.models import (
     CitedKeyInsight,
     ComparisonDimensionLLMResponse,
     Evidence,
-    InputQueryRewriteLLMResponse,
     InsightsGenerationLLMResponse,
 )
 from docvault.llm.provider import (
-    DeltaCallback,
     OpenRouterLLM,
     ProviderError,
     Schema,
@@ -171,143 +168,6 @@ def test_docling_preserves_pages_headings_and_rejects_partial_conversion(monkeyp
         parse_document_file(tmp_path / "contract.pdf", "application/pdf", "contract.pdf")
 
 
-class ChatLLM(OpenRouterLLM):
-    def __init__(
-        self,
-        answer: ChatGenerationLLMResponse | None = None,
-        input_query_rewrite: InputQueryRewriteLLMResponse | None = None,
-    ):
-        """Configure deterministic chat and rewrite results without a provider connection."""
-        self.answer = answer or ChatGenerationLLMResponse(
-            response="Payment is due in 30 days. [c1]",
-            suggestions=["When does it renew?"],
-            citation_ids=["c1"],
-            outcome="answered",
-        )
-        self.input_query_rewrite = input_query_rewrite
-        self.generations = 0
-
-    async def generate_structured_response(
-        self, schema: type[Schema], messages: list[dict], *, task: LLMTask
-    ) -> Schema:
-        """Validate the configured rewrite against the workflow-requested schema."""
-        assert schema is InputQueryRewriteLLMResponse
-        assert task == "input_query_rewrite"
-        assert self.input_query_rewrite is not None
-        return schema.model_validate(self.input_query_rewrite.model_dump())
-
-    async def stream_structured_answer(
-        self, messages: list[dict], on_delta: DeltaCallback
-    ) -> ChatGenerationLLMResponse:
-        """Emit the configured answer once and return the same validated response."""
-        self.generations += 1
-        await on_delta(self.answer.response)
-        return self.answer
-
-
-@pytest.mark.asyncio
-async def test_graph_rewrites_followups_then_retrieves_fresh_evidence():
-    queries, deltas = [], []
-
-    async def retrieve_relevant_chunks(query):
-        queries.append(query)
-        return [source()]
-
-    async def delta(value):
-        deltas.append(value)
-
-    llm = ChatLLM(
-        input_query_rewrite=InputQueryRewriteLLMResponse(
-            standalone_question="When is the contract payment due?",
-            needs_clarification=False,
-            clarification_question="",
-        )
-    )
-    answer, evidence, query = await run_document_chat_workflow(
-        "When is it due?",
-        [
-            {"role": "user", "content": "Tell me about payment."},
-        ],
-        retrieve_relevant_chunks,
-        llm,
-        delta,
-    )
-    assert queries == [query] == ["When is the contract payment due?"]
-    assert evidence == [source()]
-    assert answer.citation_ids == ["c1"]
-    assert "".join(deltas) == answer.response
-
-
-@pytest.mark.asyncio
-async def test_graph_without_evidence_does_not_generate_or_fake_deltas():
-    llm, deltas = ChatLLM(), []
-
-    async def retrieve_relevant_chunks(query):
-        return []
-
-    async def delta(value):
-        deltas.append(value)
-
-    answer, evidence, _ = await run_document_chat_workflow(
-        "Is there a fee?", [], retrieve_relevant_chunks, llm, delta
-    )
-    assert answer.outcome == "insufficient_evidence"
-    assert evidence == [] and deltas == [] and llm.generations == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "clarification_question,expected_response",
-    [
-        ("Which contract do you mean?", "Which contract do you mean?"),
-        ("", "Which document or detail do you mean?"),
-    ],
-)
-async def test_graph_ambiguous_followup_skips_retrieval(clarification_question, expected_response):
-    llm = ChatLLM(
-        input_query_rewrite=InputQueryRewriteLLMResponse(
-            standalone_question="Which contract?",
-            needs_clarification=True,
-            clarification_question=clarification_question,
-        )
-    )
-
-    async def retrieve_relevant_chunks(query):
-        pytest.fail("Ambiguous questions must not run retrieval")
-
-    async def delta(value):
-        pytest.fail("Clarification is a final response, not a fake model stream")
-
-    answer, _, _ = await run_document_chat_workflow(
-        "What about it?",
-        [{"role": "user", "content": "Compare contracts"}],
-        retrieve_relevant_chunks,
-        llm,
-        delta,
-    )
-    assert answer.outcome == "clarification_needed"
-    assert answer.response == expected_response
-    assert llm.generations == 0
-
-
-@pytest.mark.asyncio
-async def test_graph_rejects_invented_citation_ids():
-    llm = ChatLLM(
-        ChatGenerationLLMResponse(
-            response="A fee exists", suggestions=[], citation_ids=["invented"], outcome="answered"
-        )
-    )
-
-    async def retrieve_relevant_chunks(query):
-        return [source()]
-
-    async def delta(value):
-        pass
-
-    with pytest.raises(InvalidCitationError):
-        await run_document_chat_workflow("Fee?", [], retrieve_relevant_chunks, llm, delta)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batch_size", [64, 16])
 async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(
@@ -355,6 +215,10 @@ async def test_embedding_batches_reorder_by_index_and_reject_bad_dimensions(
 
 
 class SummaryLLM(OpenRouterLLM):
+    async def resolve_model_context_tokens(self, task: LLMTask) -> int:
+        """Supply a deterministic provider capacity without issuing metadata requests."""
+        return self.generation_model(task).context_tokens
+
     def generation_model(self, task: LLMTask) -> GenerationModelConfig:
         """Use a small validated context to exercise recursive map and reduction."""
         return GenerationModelConfig(

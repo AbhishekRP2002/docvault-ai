@@ -215,7 +215,10 @@ def get_version_diagnostics(
     """Show a live version's ingestion/insight jobs with original attempt identities."""
     with session() as db:
         require_version(db, version_id)
-        filters = (Job.resource_id == version_id, Job.kind.in_(["ingest", "insights"]))
+        filters = (
+            Job.resource_id == version_id,
+            Job.kind.in_(["ingest", "insights", "overview_index"]),
+        )
         total = db.scalar(select(func.count()).select_from(Job).where(*filters)) or 0
         jobs = list(
             db.scalars(

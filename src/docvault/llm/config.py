@@ -2,11 +2,11 @@
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import ENV_FILE_SENTINEL, DotenvType
 
-LLMTask = Literal["chat", "input_query_rewrite", "summary", "comparison"]
+LLMTask = Literal["chat", "conversation_summary", "summary", "comparison"]
 
 
 class GenerationModelConfig(BaseModel):
@@ -16,13 +16,6 @@ class GenerationModelConfig(BaseModel):
     context_tokens: int = Field(gt=0)
     max_output_tokens: int = Field(gt=0)
     temperature: float | None = Field(default=None, ge=0, le=2)
-
-    @model_validator(mode="after")
-    def validate_output_reservation(self) -> "GenerationModelConfig":
-        """Reject a model capacity that leaves no room for input after reserving output."""
-        if self.context_tokens <= self.max_output_tokens:
-            raise ValueError("Model context must exceed the output token reservation.")
-        return self
 
 
 class EmbeddingModelConfig(BaseModel):
@@ -38,7 +31,7 @@ class EmbeddingModelConfig(BaseModel):
 class EnvironmentSettings(BaseSettings):
     """Load settings from the environment or an explicitly selected dotenv file."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def __init__(self, *, _env_file: DotenvType | None = ENV_FILE_SENTINEL, **values: Any) -> None:
         """Forward the dotenv override while retaining normal settings validation."""
@@ -59,7 +52,7 @@ class OpenRouterSettings(EnvironmentSettings):
 
 
 class ChatModelSettings(EnvironmentSettings):
-    """Model selection and capacities for grounded chat answers."""
+    """One model's settings for native chat tool calls and grounded final answers."""
 
     def __init__(self, *, _env_file: DotenvType | None = ENV_FILE_SENTINEL, **values: Any) -> None:
         """Expose the dotenv override while preserving settings validation."""
@@ -70,9 +63,11 @@ class ChatModelSettings(EnvironmentSettings):
     openrouter_context_tokens: int = Field(default=128000, gt=0)
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_chat_temperature: float | None = None
+    # Retain the existing round-control name for the single chat tool loop.
+    agent_max_tool_rounds: int = Field(default=6, gt=0)
 
     def chat_model_configuration(self) -> GenerationModelConfig:
-        """Build the validated, immutable configuration for chat generation."""
+        """Build the shared, immutable model configuration for chat tool calls and answers."""
         return GenerationModelConfig(
             model=self.openrouter_chat_model,
             context_tokens=self.openrouter_context_tokens,
@@ -81,48 +76,25 @@ class ChatModelSettings(EnvironmentSettings):
         )
 
 
-class InputQueryRewriteModelSettings(EnvironmentSettings):
-    """Model selection and capacities for rewriting follow-up questions."""
+class ConversationSummaryModelSettings(EnvironmentSettings):
+    """Separate model and output reservation for compacting older conversation context."""
 
     def __init__(self, *, _env_file: DotenvType | None = ENV_FILE_SENTINEL, **values: Any) -> None:
         """Expose the dotenv override while preserving settings validation."""
         super().__init__(_env_file=_env_file, **values)
 
-    openrouter_input_query_rewrite_model: str = Field(
-        default="openai/gpt-4.1-nano",
-        validation_alias=AliasChoices(
-            "OPENROUTER_INPUT_QUERY_REWRITE_MODEL", "OPENROUTER_REWRITE_MODEL"
-        ),
-    )
-    openrouter_input_query_rewrite_context_tokens: int = Field(
-        default=128000,
-        gt=0,
-        validation_alias=AliasChoices(
-            "OPENROUTER_INPUT_QUERY_REWRITE_CONTEXT_TOKENS", "OPENROUTER_REWRITE_CONTEXT_TOKENS"
-        ),
-    )
-    openrouter_input_query_rewrite_max_output_tokens: int = Field(
-        default=1024,
-        gt=0,
-        validation_alias=AliasChoices(
-            "OPENROUTER_INPUT_QUERY_REWRITE_MAX_OUTPUT_TOKENS",
-            "OPENROUTER_REWRITE_MAX_OUTPUT_TOKENS",
-        ),
-    )
-    openrouter_input_query_rewrite_temperature: float | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "OPENROUTER_INPUT_QUERY_REWRITE_TEMPERATURE", "OPENROUTER_REWRITE_TEMPERATURE"
-        ),
-    )
+    openrouter_conversation_summary_model: str = "openai/gpt-4.1-mini"
+    openrouter_conversation_summary_context_tokens: int = Field(default=128000, gt=0)
+    openrouter_conversation_summary_max_output_tokens: int = Field(default=2048, gt=0)
+    openrouter_conversation_summary_temperature: float | None = None
 
-    def input_query_rewrite_model_configuration(self) -> GenerationModelConfig:
-        """Build the validated, immutable configuration for question rewriting."""
+    def conversation_summary_model_configuration(self) -> GenerationModelConfig:
+        """Build independent settings for summarizing conversation memory, never source evidence."""
         return GenerationModelConfig(
-            model=self.openrouter_input_query_rewrite_model,
-            context_tokens=self.openrouter_input_query_rewrite_context_tokens,
-            max_output_tokens=self.openrouter_input_query_rewrite_max_output_tokens,
-            temperature=self.openrouter_input_query_rewrite_temperature,
+            model=self.openrouter_conversation_summary_model,
+            context_tokens=self.openrouter_conversation_summary_context_tokens,
+            max_output_tokens=self.openrouter_conversation_summary_max_output_tokens,
+            temperature=self.openrouter_conversation_summary_temperature,
         )
 
 
@@ -197,7 +169,7 @@ class EmbeddingModelSettings(EnvironmentSettings):
 class LLMSettings(
     OpenRouterSettings,
     ChatModelSettings,
-    InputQueryRewriteModelSettings,
+    ConversationSummaryModelSettings,
     SummaryModelSettings,
     ComparisonModelSettings,
     EmbeddingModelSettings,
@@ -212,7 +184,7 @@ class LLMSettings(
         """Resolve a task's configuration through its dedicated settings class."""
         configurations = {
             "chat": self.chat_model_configuration,
-            "input_query_rewrite": self.input_query_rewrite_model_configuration,
+            "conversation_summary": self.conversation_summary_model_configuration,
             "summary": self.summary_model_configuration,
             "comparison": self.comparison_model_configuration,
         }

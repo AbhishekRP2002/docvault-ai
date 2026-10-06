@@ -232,10 +232,16 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
         and node.func.attr in {"create_table", "drop_table"}
         and node.args
         and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
     ]
-    # Additive tables must not recreate the ledger in either migration direction.
+    # Additive features may create their tables; neither direction may recreate the ledger.
     assert sorted(table_operations) == [
-        "job_stage_runs", "job_stage_runs", "workspace_revisions", "workspace_revisions"
+        "document_overviews",
+        "document_overviews",
+        "job_stage_runs",
+        "job_stage_runs",
+        "workspace_revisions",
+        "workspace_revisions",
     ]
     assert 'postgresql_with={"m": 32, "ef_construction": 200}' in generated_source
     command.upgrade(generated_config, "head")
@@ -247,6 +253,49 @@ def test_alembic_autogeneration_preserves_ledger_rename(isolated_database, tmp_p
     command.downgrade(generated_config, PREVIOUS_REVISION)
     with isolated_database.engine.connect() as connection:
         assert connection.scalar(text("SELECT input_tokens FROM ai_calls")) == 12
+
+
+def test_agent_migration_preserves_old_messages_and_builds_discovery_indexes(isolated_database):
+    """Backfill an empty trace for old turns and retain original data through downgrade."""
+    command.upgrade(isolated_database.alembic, "b91f270f1115")
+    with isolated_database.engine.begin() as connection:
+        connection.execute(
+            text("""
+            INSERT INTO chats (id, title, version_ids, created_at, updated_at)
+            VALUES ('old-chat', 'Existing session', '[]'::jsonb, now(), now())
+        """)
+        )
+        connection.execute(
+            text("""
+            INSERT INTO messages
+                (id, chat_id, role, status, content, suggestions, citations, version_ids,
+                 created_at, updated_at)
+            VALUES ('old-message', 'old-chat', 'assistant', 'complete', 'Existing answer',
+                    '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, now(), now())
+        """)
+        )
+        before = dict(connection.execute(text("SELECT * FROM messages")).mappings().one())
+    command.upgrade(isolated_database.alembic, "head")
+    with isolated_database.engine.connect() as connection:
+        after = dict(connection.execute(text("SELECT * FROM messages")).mappings().one())
+        assert after.pop("agent_trace") == []
+        assert after == before
+        indexes = {
+            row.indexname: row.indexdef
+            for row in connection.execute(
+                text("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname=:schema"),
+                {"schema": isolated_database.schema},
+            )
+        }
+        assert (
+            "USING hnsw (embedding vector_cosine_ops)"
+            in indexes["ix_document_overviews_embedding_hnsw"]
+        )
+        assert "USING gin (search)" in indexes["ix_document_overviews_search"]
+    command.downgrade(isolated_database.alembic, "b91f270f1115")
+    with isolated_database.engine.connect() as connection:
+        assert dict(connection.execute(text("SELECT * FROM messages")).mappings().one()) == before
+        assert "document_overviews" not in inspect(connection).get_table_names()
 
 
 def seed_retrieval_corpus(engine):
