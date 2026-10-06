@@ -35,7 +35,13 @@ Model defaults live in [src/docvault/llm/config.py](src/docvault/llm/config.py).
 | `OPENROUTER_COMPARISON_MODEL` | Document comparisons | `openai/gpt-5.6-luna` |
 | `OPENROUTER_CONVERSATION_SUMMARY_MODEL` | Condense older chat history | `openai/gpt-5.6-luna` |
 | `OPENROUTER_EMBEDDING_MODEL` | Document search embeddings | `openai/text-embedding-3-small` |
+| `OPENROUTER_CHAT_REASONING_EFFORT` | Chat reasoning effort | `medium` |
+| `OPENROUTER_SUMMARY_REASONING_EFFORT` | Summary reasoning effort | `medium` |
+| `OPENROUTER_COMPARISON_REASONING_EFFORT` | Comparison reasoning effort | `medium` |
+| `OPENROUTER_CONVERSATION_SUMMARY_REASONING_EFFORT` | Conversation memory reasoning effort | `medium` |
 | `AGENT_MAX_TOOL_ROUNDS` | Maximum tool-use rounds per answer | `20` |
+
+Both Luna models use `medium` reasoning by default. Supported effort values are `none`, `low`, `medium`, `high`, `xhigh`, and `max`; `none` disables reasoning. Reasoning and the visible answer share the completion budget (4,096 tokens, or 2,048 for conversation memory). Higher effort can increase latency and leave less room for the answer. If switching to a model without reasoning support, remove its effort override. See [OpenRouter's reasoning documentation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
 Docker Compose supplies `DATABASE_URL`, `REDIS_URL`, and `STORAGE_PATH` inside the containers. The sample leaves token limits, database/health tuning, and parser settings at their code defaults. No frontend environment file is needed. Run the startup command again after changing `.env`.
 

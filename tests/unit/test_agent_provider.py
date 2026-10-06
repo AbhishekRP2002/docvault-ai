@@ -163,12 +163,73 @@ async def test_native_calls_keep_ids_strict_parsed_arguments_using_chat_model():
         "tool_calls": calls,
     }
     assert requested[0]["model"] == "test/chat"
+    assert "reasoning" not in requested[0]
     assert requested[0]["tool_choice"] == "auto"
     assert requested[0]["provider"]["require_parameters"]
     assert requested[0]["response_format"]["json_schema"]["strict"]
     assert usage[0]["operation"] == "tool_selection"
     assert usage[0]["status"] == "succeeded" and usage[0]["cost_usd"] == 0.003
     assert usage[0]["input_tokens"] == 42 and usage[0]["output_tokens"] == 12
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", ["low", "none", "xhigh", "max"])
+async def test_native_tool_reasoning_is_preserved_and_echoed_through_sdk(effort):
+    details = [
+        {
+            "type": "reasoning.encrypted",
+            "data": "opaque",
+            "id": "r1",
+            "format": "openai-responses-v1",
+            "index": 0,
+        }
+    ]
+
+    class ReasoningToolStream(NativeToolStream):
+        async def __aiter__(self):
+            yield self.event({"reasoning": "First ", "reasoning_details": details})
+            yield self.event(
+                {
+                    "reasoning": "second",
+                    "reasoning_details": [{"index": 0, "data": "-continuation"}],
+                }
+            )
+            async for chunk in super().__aiter__():
+                yield chunk
+
+    calls = [native_call("get_selected_document_overviews", {"cursor": None})]
+    requested, deltas = [], []
+
+    def handler(request):
+        requested.append(json.loads(request.content))
+        if len(requested) == 1:
+            return native_response(ReasoningToolStream(calls))
+        return native_response(ResponseStream([json.dumps(HELP_RESPONSE)], usage=PROVIDER_USAGE))
+
+    llm = create_provider(handler, openrouter_chat_reasoning_effort=effort)
+    try:
+        turn = await llm.stream_chat_turn(
+            [], build_agent_tool_definitions(), no_delta, evidence_ids=[]
+        )
+        expected = [{**details[0], "data": "opaque-continuation"}]
+        assert turn.assistant_message["reasoning"] == "First second"
+        assert turn.assistant_message["reasoning_details"] == expected
+
+        async def delta(text):
+            deltas.append(text)
+
+        await llm.stream_chat_turn(
+            [turn.assistant_message, {"role": "tool", "tool_call_id": "call-1", "content": "{}"}],
+            build_agent_tool_definitions(),
+            delta,
+            evidence_ids=[],
+        )
+    finally:
+        await llm.close()
+    assert all(request["reasoning"] == {"effort": effort} for request in requested)
+    assert requested[1]["messages"][0]["reasoning_details"] == expected
+    assert requested[1]["messages"][0]["reasoning"] == "First second"
+    assert "".join(deltas) == HELP_RESPONSE["response"]
 
 
 @pytest.mark.asyncio
@@ -329,6 +390,7 @@ def test_all_native_rounds_use_one_chat_configuration():
         "context_tokens": 10000,
         "max_output_tokens": 512,
         "temperature": 0,
+        "reasoning_effort": None,
     }
     assert settings.agent_max_tool_rounds == 4
     assert "openrouter_agent_model" not in LLMSettings.model_fields

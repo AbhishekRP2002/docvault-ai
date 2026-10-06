@@ -133,7 +133,19 @@ class OpenRouterLLM:
         }
         if configuration.temperature is not None:
             parameters["temperature"] = configuration.temperature
+        if configuration.reasoning_effort is not None:
+            parameters["extra_body"]["reasoning"] = {"effort": configuration.reasoning_effort}
         return parameters
+
+    @staticmethod
+    def _reasoning_fields(message: BaseModel) -> dict:
+        """Echo provider reasoning unchanged so tool results can continue the same turn."""
+        payload = message.model_dump(include={"reasoning", "reasoning_details"})
+        return {
+            field: payload[field]
+            for field in ("reasoning", "reasoning_details")
+            if payload.get(field) is not None
+        }
 
     async def _record_provider_usage(
         self, result: dict, operation: str, started: float, status: str, requested_model: str
@@ -311,6 +323,7 @@ class OpenRouterLLM:
                             "role": "assistant",
                             "content": None,
                             "tool_calls": native_calls,
+                            **self._reasoning_fields(choice.message),
                         },
                         tool_calls=calls,
                     )
@@ -329,7 +342,11 @@ class OpenRouterLLM:
                     raise ProviderError("The LLM provider returned inconsistent answer content.")
                 status = "succeeded"
                 return ChatAgentTurn(
-                    assistant_message={"role": "assistant", "content": choice.message.content},
+                    assistant_message={
+                        "role": "assistant",
+                        "content": choice.message.content,
+                        **self._reasoning_fields(choice.message),
+                    },
                     tool_calls=[],
                     answer=answer,
                 )

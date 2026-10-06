@@ -230,6 +230,7 @@ def test_default_generation_models_are_selected_by_task(
     assert configuration.model == model
     assert configuration.context_tokens == 1_050_000
     assert configuration.max_output_tokens == output_tokens
+    assert configuration.reasoning_effort == "medium"
     assert settings.embedding_model().model == "openai/text-embedding-3-small"
     assert settings.embedding_model().dimensions == 1536
 
@@ -273,6 +274,7 @@ def test_environment_overrides_are_independent_for_each_task(clean_model_environ
             "context_tokens": context,
             "max_output_tokens": output,
             "temperature": temperature,
+            "reasoning_effort": None,
         }
     assert settings.embedding_model().model_dump() == {
         "model": "test/embedding",
@@ -283,6 +285,29 @@ def test_environment_overrides_are_independent_for_each_task(clean_model_environ
     }
 
 
+@pytest.mark.parametrize("task", ["chat", "conversation_summary", "summary", "comparison"])
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+def test_reasoning_effort_overrides_only_its_task(
+    clean_model_environment, monkeypatch, task, effort
+):
+    monkeypatch.setenv(f"OPENROUTER_{task.upper()}_REASONING_EFFORT", effort)
+    settings = LLMSettings(_env_file=None)
+    for selected in ("chat", "conversation_summary", "summary", "comparison"):
+        assert settings.generation_model(selected).reasoning_effort == (
+            effort if selected == task else "medium"
+        )
+
+
+@pytest.mark.parametrize("task", ["chat", "conversation_summary", "summary", "comparison"])
+@pytest.mark.parametrize("effort", ["minimal", "invalid", ""])
+def test_invalid_luna_effort_is_rejected_at_settings_load(
+    clean_model_environment, monkeypatch, task, effort
+):
+    monkeypatch.setenv(f"OPENROUTER_{task.upper()}_REASONING_EFFORT", effort)
+    with pytest.raises(ValidationError, match=f"openrouter_{task}_reasoning_effort"):
+        LLMSettings(_env_file=None)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -290,6 +315,7 @@ def test_environment_overrides_are_independent_for_each_task(clean_model_environ
         ("context_tokens", 64000),
         ("max_output_tokens", 2048),
         ("temperature", 0.5),
+        ("reasoning_effort", "low"),
     ],
 )
 def test_each_generation_setting_changes_reuse_identity(clean_model_environment, field, value):

@@ -142,6 +142,7 @@ async def test_sdk_stream_emits_stable_unicode_text_before_completion(value):
     assert request["stream"]
     assert "stream_options" not in request and "usage" not in request
     assert request["provider"]["require_parameters"]
+    assert request["reasoning"] == {"effort": "medium"}
     assert request["response_format"]["json_schema"]["strict"]
     assert request["response_format"]["json_schema"]["schema"]["additionalProperties"] is False
     assert usage[0]["status"] == "succeeded" and usage[0]["cost_usd"] == 0.003
@@ -260,10 +261,45 @@ async def test_sdk_parses_pydantic_model_with_task_specific_configuration():
     request = requested[0]
     assert request["model"] == "test/comparison" and request["max_tokens"] == 512
     assert request["temperature"] == 0
+    assert "reasoning" not in request  # Arbitrary model overrides retain provider defaults.
     assert request["response_format"]["json_schema"]["name"] == "ComparisonDimensionLLMResponse"
     assert usage[0]["status"] == "succeeded" and usage[0]["cost_usd"] == 0.003
     assert usage[0]["input_tokens"] == 42 and usage[0]["output_tokens"] == 12
     assert usage[0]["cached_tokens"] == 8 and usage[0]["request_id"] == "req1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "task,effort",
+    [
+        ("chat", "high"),
+        ("conversation_summary", "none"),
+        ("summary", "low"),
+        ("comparison", "xhigh"),
+    ],
+)
+async def test_structured_generation_sends_task_reasoning_through_sdk(task, effort):
+    requested = []
+
+    def handler(request):
+        requested.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json=completion(
+                json.dumps(
+                    {"finding_text": "Supported.", "status": "found", "citation_ids": ["c1"]}
+                )
+            ),
+        )
+
+    llm = create_provider(handler, **{f"openrouter_{task}_reasoning_effort": effort})
+    try:
+        await llm.generate_structured_response(ComparisonDimensionLLMResponse, [], task=task)
+    finally:
+        await llm.close()
+    assert requested[0]["reasoning"] == {"effort": effort}
+    assert requested[0]["provider"] == {"require_parameters": True}
+    assert requested[0]["max_tokens"] == (2048 if task == "conversation_summary" else 4096)
 
 
 @pytest.mark.asyncio

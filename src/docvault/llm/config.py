@@ -7,8 +7,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import ENV_FILE_SENTINEL, DotenvType
 
 LLMTask = Literal["chat", "conversation_summary", "summary", "comparison"]
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 
 DEFAULT_CONTEXT_TOKENS = 1_050_000
+
+
+def resolve_reasoning_effort(model: str, effort: ReasoningEffort | None) -> ReasoningEffort | None:
+    """Make Luna's medium default explicit; leave other models unchanged unless configured."""
+    if effort is None and model in {"openai/gpt-6-luna", "openai/gpt-5.6-luna"}:
+        return "medium"
+    return effort
 
 
 class GenerationModelConfig(BaseModel):
@@ -18,6 +26,7 @@ class GenerationModelConfig(BaseModel):
     context_tokens: int = Field(gt=0)
     max_output_tokens: int = Field(gt=0)
     temperature: float | None = Field(default=None, ge=0, le=2)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class EmbeddingModelConfig(BaseModel):
@@ -62,6 +71,7 @@ class ChatModelSettings(EnvironmentSettings):
     openrouter_context_tokens: int = Field(default=DEFAULT_CONTEXT_TOKENS, gt=0)
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_chat_temperature: float | None = None
+    openrouter_chat_reasoning_effort: ReasoningEffort | None = None
     agent_max_tool_rounds: int = Field(default=20, gt=0)
 
     def chat_model_configuration(self) -> GenerationModelConfig:
@@ -71,6 +81,9 @@ class ChatModelSettings(EnvironmentSettings):
             context_tokens=self.openrouter_context_tokens,
             max_output_tokens=self.openrouter_max_output_tokens,
             temperature=self.openrouter_chat_temperature,
+            reasoning_effort=resolve_reasoning_effort(
+                self.openrouter_chat_model, self.openrouter_chat_reasoning_effort
+            ),
         )
 
 
@@ -87,6 +100,7 @@ class ConversationSummaryModelSettings(EnvironmentSettings):
     )
     openrouter_conversation_summary_max_output_tokens: int = Field(default=2048, gt=0)
     openrouter_conversation_summary_temperature: float | None = None
+    openrouter_conversation_summary_reasoning_effort: ReasoningEffort | None = None
 
     def conversation_summary_model_configuration(self) -> GenerationModelConfig:
         """Build independent settings for summarizing conversation memory, never source evidence."""
@@ -95,6 +109,10 @@ class ConversationSummaryModelSettings(EnvironmentSettings):
             context_tokens=self.openrouter_conversation_summary_context_tokens,
             max_output_tokens=self.openrouter_conversation_summary_max_output_tokens,
             temperature=self.openrouter_conversation_summary_temperature,
+            reasoning_effort=resolve_reasoning_effort(
+                self.openrouter_conversation_summary_model,
+                self.openrouter_conversation_summary_reasoning_effort,
+            ),
         )
 
 
@@ -109,6 +127,7 @@ class SummaryModelSettings(EnvironmentSettings):
     openrouter_summary_context_tokens: int = Field(default=DEFAULT_CONTEXT_TOKENS, gt=0)
     openrouter_summary_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_summary_temperature: float | None = None
+    openrouter_summary_reasoning_effort: ReasoningEffort | None = None
 
     def summary_model_configuration(self) -> GenerationModelConfig:
         """Build the validated, immutable configuration for summary generation."""
@@ -117,6 +136,9 @@ class SummaryModelSettings(EnvironmentSettings):
             context_tokens=self.openrouter_summary_context_tokens,
             max_output_tokens=self.openrouter_summary_max_output_tokens,
             temperature=self.openrouter_summary_temperature,
+            reasoning_effort=resolve_reasoning_effort(
+                self.openrouter_summary_model, self.openrouter_summary_reasoning_effort
+            ),
         )
 
 
@@ -131,6 +153,7 @@ class ComparisonModelSettings(EnvironmentSettings):
     openrouter_comparison_context_tokens: int = Field(default=DEFAULT_CONTEXT_TOKENS, gt=0)
     openrouter_comparison_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_comparison_temperature: float | None = None
+    openrouter_comparison_reasoning_effort: ReasoningEffort | None = None
 
     def comparison_model_configuration(self) -> GenerationModelConfig:
         """Build the validated, immutable configuration for document comparison."""
@@ -139,6 +162,9 @@ class ComparisonModelSettings(EnvironmentSettings):
             context_tokens=self.openrouter_comparison_context_tokens,
             max_output_tokens=self.openrouter_comparison_max_output_tokens,
             temperature=self.openrouter_comparison_temperature,
+            reasoning_effort=resolve_reasoning_effort(
+                self.openrouter_comparison_model, self.openrouter_comparison_reasoning_effort
+            ),
         )
 
 
